@@ -1,0 +1,1252 @@
+--========================================================--
+-- VANZ — MOD MENU v8-MAX MERGED (CENTER-TOP HUD)
+--========================================================--
+
+_G.vanz = _G.vanz or {}
+_G.vanz.Settings = _G.vanz.Settings or {}
+_G.vanz.Events   = _G.vanz.Events   or {}
+_G.vanz.Runtime  = _G.vanz.Runtime  or {}
+
+--========================================================--
+-- 0_CONFIG
+--========================================================--
+_G.vanz.TeamCfg = _G.vanz.TeamCfg or {
+    enemyKeywords = { "kill", "murder", "slasher", "hunter", "monster", "enemy" },
+    allyKeywords  = { "survivor", "innocent", "runner", "civilian", "player", "ally" },
+    enemyR = 0.55,
+    allyB  = 0.55,
+}
+
+_G.vanz.AimCfg = _G.vanz.AimCfg or {
+    originMode       = "gun",
+    targetMode       = "uppertorso",
+    leadPrediction   = true,
+    bulletSpeed      = 200,
+    bulletSpeedAuto  = true,
+    leadIterations   = 9999,
+    flipY            = false,
+    flipZ            = false,
+    maxScanDistance  = 999,
+    minFPSForMaxIter = 55,
+    -- === LATERAL OFFSET ===
+    lateralOffset    = 0.5,             -- + = kanan target, - = kiri target
+    lateralAxis      = "RightVector",   -- "RightVector" / "UpVector" / "LookVector"
+}
+
+--========================================================--
+-- 1_INIT_GUI  ← 1 TOGGLE MASTER "SILENT AIM" (FIXED TOP-LAYER)
+--========================================================--
+do
+    local BLOCK = "1_INIT_GUI"
+    local function handler(err)
+        local trace = debug.traceback("", 2)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s", BLOCK, tostring(err), trace))
+        return tostring(err) .. "\n" .. trace
+    end
+
+    xpcall(function()
+        local Players           = game:GetService("Players")
+        local UserInputService  = game:GetService("UserInputService")
+        local LocalPlayer       = Players.LocalPlayer
+        local PlayerGui         = LocalPlayer:WaitForChild("PlayerGui")
+
+        local old = PlayerGui:FindFirstChild("VANZ_GUI")
+        if old then old:Destroy() end
+        local oldCore = game:GetService("CoreGui"):FindFirstChild("VANZ_GUI")
+        if oldCore then oldCore:Destroy() end
+
+        _G.vanz.GUI = {}
+
+        local ScreenGui = Instance.new("ScreenGui")
+        ScreenGui.Name            = "VANZ_GUI"
+        ScreenGui.ResetOnSpawn    = false
+        ScreenGui.IgnoreGuiInset  = false
+        ScreenGui.ZIndexBehavior  = Enum.ZIndexBehavior.Global -- Diubah ke Global agar ZIndex absolut
+        ScreenGui.DisplayOrder    = 999999                    -- Lapisan paling atas di atas game
+
+        -- Proteksi CoreGui / gethui agar kebal dari ketindihan GUI game
+        local targetParent = PlayerGui
+        if syn and syn.protect_gui then
+            syn.protect_gui(ScreenGui)
+            targetParent = game:GetService("CoreGui")
+        elseif gethui then
+            targetParent = gethui()
+        end
+        ScreenGui.Parent = targetParent
+
+        _G.vanz.GUI.ScreenGui = ScreenGui
+
+        local Main = Instance.new("Frame")
+        Main.Name              = "Main"
+        Main.AnchorPoint       = Vector2.new(0, 0.5)
+        Main.Position          = UDim2.new(0, 10, 0.5, 0)
+        Main.Size              = UDim2.new(0, 260, 0, 130)
+        Main.BackgroundColor3  = Color3.fromRGB(18, 18, 22)
+        Main.BorderSizePixel   = 0
+        Main.ZIndex            = 10
+        Main.Parent            = ScreenGui
+        Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 10)
+        _G.vanz.GUI.Main = Main
+
+        local TitleBar = Instance.new("Frame")
+        TitleBar.Size                  = UDim2.new(1, 0, 0, 45)
+        TitleBar.BackgroundColor3      = Color3.fromRGB(24, 24, 30)
+        TitleBar.BorderSizePixel       = 0
+        TitleBar.ZIndex                = 11
+        TitleBar.Parent                = Main
+        Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 10)
+
+        local Title = Instance.new("TextLabel")
+        Title.Size              = UDim2.new(1, -55, 1, 0)
+        Title.Position          = UDim2.new(0, 15, 0, 0)
+        Title.BackgroundTransparency = 1
+        Title.Text              = "VANZ  •  MAX"
+        Title.TextColor3        = Color3.fromRGB(255, 60, 60)
+        Title.TextSize          = 16
+        Title.Font              = Enum.Font.GothamBold
+        Title.TextXAlignment    = Enum.TextXAlignment.Left
+        Title.ZIndex            = 12
+        Title.Parent            = TitleBar
+
+        local Minimize = Instance.new("TextButton")
+        Minimize.Size            = UDim2.new(0, 32, 0, 32)
+        Minimize.Position        = UDim2.new(1, -40, 0, 7)
+        Minimize.BackgroundColor3= Color3.fromRGB(35, 35, 42)
+        Minimize.Text            = "–"
+        Minimize.TextColor3      = Color3.fromRGB(255, 255, 255)
+        Minimize.TextSize        = 20
+        Minimize.Font            = Enum.Font.GothamBold
+        Minimize.AutoButtonColor = false
+        Minimize.ZIndex            = 12
+        Minimize.Parent          = TitleBar
+        Instance.new("UICorner", Minimize).CornerRadius = UDim.new(0, 8)
+
+        local Content = Instance.new("Frame")
+        Content.Name                 = "Content"
+        Content.Position             = UDim2.new(0, 10, 0, 55)
+        Content.Size                 = UDim2.new(1, -20, 1, -65)
+        Content.BackgroundTransparency = 1
+        Content.ZIndex               = 11
+        Content.Parent               = Main
+
+        local Holder = Instance.new("Frame")
+        Holder.Size              = UDim2.new(1, 0, 0, 65)
+        Holder.BackgroundColor3  = Color3.fromRGB(26, 26, 32)
+        Holder.BorderSizePixel   = 0
+        Holder.ZIndex            = 12
+        Holder.Parent            = Content
+        Instance.new("UICorner", Holder).CornerRadius = UDim.new(0, 8)
+
+        local Label = Instance.new("TextLabel")
+        Label.Position          = UDim2.new(0, 12, 0, 7)
+        Label.Size              = UDim2.new(1, -65, 0, 25)
+        Label.BackgroundTransparency = 1
+        Label.Text              = "SILENT AIM"
+        Label.TextColor3        = Color3.fromRGB(255, 100, 100)
+        Label.TextSize          = 15
+        Label.Font              = Enum.Font.GothamBold
+        Label.TextXAlignment    = Enum.TextXAlignment.Left
+        Label.ZIndex            = 13
+        Label.Parent            = Holder
+
+        local Desc = Instance.new("TextLabel")
+        Desc.Position           = UDim2.new(0, 12, 0, 31)
+        Desc.Size               = UDim2.new(1, -65, 0, 25)
+        Desc.BackgroundTransparency = 1
+        Desc.Text               = "Lead + Fire + Visual + Anti-Knock + Anti-Death + Auto-Heal"
+        Desc.TextColor3         = Color3.fromRGB(140, 140, 155)
+        Desc.TextSize           = 10
+        Desc.Font               = Enum.Font.Gotham
+        Desc.TextXAlignment     = Enum.TextXAlignment.Left
+        Desc.TextWrapped        = true
+        Desc.ZIndex             = 13
+        Desc.Parent             = Holder
+
+        local Toggle = Instance.new("TextButton")
+        Toggle.Size              = UDim2.new(0, 42, 0, 24)
+        Toggle.Position          = UDim2.new(1, -52, 0.5, -12)
+        Toggle.BackgroundColor3  = Color3.fromRGB(55, 55, 65)
+        Toggle.Text              = ""
+        Toggle.AutoButtonColor   = false
+        Toggle.ZIndex            = 13
+        Toggle.Parent            = Holder
+        Instance.new("UICorner", Toggle).CornerRadius = UDim.new(1, 0)
+
+        local Knob = Instance.new("Frame")
+        Knob.Size              = UDim2.new(0, 18, 0, 18)
+        Knob.Position          = UDim2.new(0, 3, 0.5, -9)
+        Knob.BackgroundColor3  = Color3.fromRGB(225, 225, 225)
+        Knob.ZIndex            = 14
+        Knob.Parent            = Toggle
+        Instance.new("UICorner", Knob).CornerRadius = UDim.new(1, 0)
+
+        _G.vanz.Settings.SilentAim  = false
+        _G.vanz.Settings.VisualLine = false
+        _G.vanz.Settings.FireButton = false
+        _G.vanz.Settings.LeadPredict = false
+        _G.vanz.Settings.AntiKnock  = false
+        _G.vanz.Settings.AntiDeath  = false
+        _G.vanz.Settings.AutoHeal   = false
+
+        local function UpdateVisual()
+            if _G.vanz.Settings.SilentAim then
+                Toggle.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
+                Knob.Position           = UDim2.new(1, -21, 0.5, -9)
+                Label.TextColor3        = Color3.fromRGB(255, 150, 150)
+            else
+                Toggle.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+                Knob.Position           = UDim2.new(0, 3, 0.5, -9)
+                Label.TextColor3        = Color3.fromRGB(255, 100, 100)
+            end
+        end
+
+        Toggle.MouseButton1Click:Connect(function()
+            local on = not _G.vanz.Settings.SilentAim
+            _G.vanz.Settings.SilentAim  = on
+            _G.vanz.Settings.VisualLine = on
+            _G.vanz.Settings.FireButton = on
+            _G.vanz.Settings.LeadPredict = on
+            _G.vanz.Settings.AntiKnock  = on
+            _G.vanz.Settings.AntiDeath  = on
+            _G.vanz.Settings.AutoHeal   = on
+
+            UpdateVisual()
+
+            if _G.vanz.Runtime.FireButton then
+                _G.vanz.Runtime.FireButton.Visible = on
+            end
+            if not on then
+                if _G.vanz.Runtime.DrawLine   then _G.vanz.Runtime.DrawLine.Visible   = false end
+                if _G.vanz.Runtime.DrawDot    then _G.vanz.Runtime.DrawDot.Visible    = false end
+                if _G.vanz.Runtime.DrawRawDot then _G.vanz.Runtime.DrawRawDot.Visible = false end
+            end
+
+            local keys = { "FireButton", "VisualLine", "LeadPredict" }
+            for _, k in ipairs(keys) do
+                local ev = _G.vanz.Events[k]
+                if type(ev) == "function" then
+                    task.spawn(function()
+                        xpcall(function() ev(on) end, function(err)
+                            warn(string.format(
+                                "[VANZ ERROR][%s] %s\n%s",
+                                k, tostring(err), debug.traceback("", 2)
+                            ))
+                        end)
+                    end)
+                end
+            end
+        end)
+
+        UpdateVisual()
+
+        _G.vanz.FireTof = _G.vanz.FireTof or function()
+            warn("[VANZ] FireTof belum siap.")
+        end
+
+        local FireBtn = Instance.new("TextButton")
+        FireBtn.Name              = "VANZ_FireBtn"
+        FireBtn.AnchorPoint       = Vector2.new(1, 0.5)
+        FireBtn.Position          = UDim2.new(1, -20, 0.5, 0)
+        FireBtn.Size              = UDim2.new(0, 70, 0, 70)
+        FireBtn.BackgroundColor3  = Color3.fromRGB(180, 40, 40)
+        FireBtn.BackgroundTransparency = 0.15
+        FireBtn.Text              = "FIRE"
+        FireBtn.TextColor3        = Color3.fromRGB(255, 255, 255)
+        FireBtn.TextSize          = 16
+        FireBtn.Font              = Enum.Font.GothamBold
+        FireBtn.AutoButtonColor   = true
+        FireBtn.Visible           = false
+        FireBtn.Active            = true
+        FireBtn.ZIndex            = 100 -- Dipastikan paling atas di antara komponen GUI
+        FireBtn.Parent            = ScreenGui
+        Instance.new("UICorner", FireBtn).CornerRadius = UDim.new(1, 0)
+        local fstroke = Instance.new("UIStroke")
+        fstroke.Color     = Color3.fromRGB(255, 90, 90)
+        fstroke.Thickness = 2
+        fstroke.Parent    = FireBtn
+
+        FireBtn.MouseButton1Click:Connect(function()
+            task.spawn(function()
+                xpcall(function()
+                    _G.vanz.FireTof()
+                end, function(err)
+                    warn(string.format(
+                        "[VANZ ERROR][FireButton] %s\n%s",
+                        tostring(err), debug.traceback("", 2)
+                    ))
+                end)
+            end)
+        end)
+
+        _G.vanz.Runtime.FireButton = FireBtn
+
+        local Logo = Instance.new("TextButton")
+        Logo.Name              = "FloatingLogo"
+        Logo.Size              = UDim2.new(0, 52, 0, 52)
+        Logo.Position          = UDim2.new(0, 10, 0.5, -26)
+        Logo.BackgroundColor3  = Color3.fromRGB(18, 18, 22)
+        Logo.Text              = "V"
+        Logo.TextColor3        = Color3.fromRGB(255, 60, 60)
+        Logo.TextSize          = 22
+        Logo.Font              = Enum.Font.GothamBold
+        Logo.AutoButtonColor   = false
+        Logo.Visible           = false
+        Logo.ZIndex            = 100
+        Logo.Parent            = ScreenGui
+        Instance.new("UICorner", Logo).CornerRadius = UDim.new(1, 0)
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(255, 60, 60)
+        stroke.Thickness = 2
+        stroke.Parent = Logo
+        _G.vanz.GUI.Logo = Logo
+
+        Minimize.MouseButton1Click:Connect(function()
+            Main.Visible = false; Logo.Visible = true
+        end)
+        Logo.MouseButton1Click:Connect(function()
+            Logo.Visible = false; Main.Visible = true
+        end)
+
+        local function MakeDraggable(object)
+            local dragging, dragStart, startPos, dragInput
+            local function update(input)
+                local delta = input.Position - dragStart
+                object.Position = UDim2.new(
+                    startPos.X.Scale, startPos.X.Offset + delta.X,
+                    startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+            object.InputBegan:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseButton1
+                or input.UserInputType == Enum.UserInputType.Touch then
+                    dragging = true; dragStart = input.Position; startPos = object.Position
+                    input.Changed:Connect(function()
+                        if input.UserInputState == Enum.UserInputState.End then
+                            dragging = false
+                        end
+                    end)
+                end
+            end)
+            object.InputChanged:Connect(function(input)
+                if input.UserInputType == Enum.UserInputType.MouseMovement
+                or input.UserInputType == Enum.UserInputType.Touch then
+                    dragInput = input
+                end
+            end)
+            UserInputService.InputChanged:Connect(function(input)
+                if dragging and input == dragInput then update(input) end
+            end)
+        end
+
+        MakeDraggable(Main); MakeDraggable(Logo)
+
+        local function Resize()
+            local cam = workspace.CurrentCamera
+            if not cam then return end
+            local vp = cam.ViewportSize
+            Main.Size = UDim2.new(0, math.min(260, vp.X - 20), 0, 130)
+        end
+        Resize()
+
+        local function HookCam(cam)
+            if not cam then return end
+            cam:GetPropertyChangedSignal("ViewportSize"):Connect(Resize)
+        end
+        HookCam(workspace.CurrentCamera)
+
+        workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+            task.defer(function()
+                HookCam(workspace.CurrentCamera); Resize()
+            end)
+        end)
+    end, handler)
+end
+
+--========================================================--
+-- 2_FPS_MONITOR
+--========================================================--
+do
+    local BLOCK = "2_FPS_MONITOR"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local RunService = game:GetService("RunService")
+
+        _G.vanz.Runtime.SmoothFPS = 60
+        _G.vanz.Runtime.FrameTimeAcc = 0
+        _G.vanz.Runtime.FrameCount = 0
+        _G.vanz.Runtime.LastFPSSample = tick()
+
+        RunService.Heartbeat:Connect(function(dt)
+            local now = tick()
+            _G.vanz.Runtime.FrameTimeAcc = _G.vanz.Runtime.FrameTimeAcc + dt
+            _G.vanz.Runtime.FrameCount = _G.vanz.Runtime.FrameCount + 1
+
+            if now - _G.vanz.Runtime.LastFPSSample >= 0.5 then
+                local avgDt = _G.vanz.Runtime.FrameTimeAcc / math.max(_G.vanz.Runtime.FrameCount, 1)
+                local fps = 1 / math.max(avgDt, 0.001)
+                _G.vanz.Runtime.SmoothFPS = _G.vanz.Runtime.SmoothFPS * 0.7 + fps * 0.3
+                _G.vanz.Runtime.FrameTimeAcc = 0
+                _G.vanz.Runtime.FrameCount = 0
+                _G.vanz.Runtime.LastFPSSample = now
+            end
+        end)
+
+        print("[VANZ] FPS monitor ready.")
+    end, handler)
+end
+
+--========================================================--
+-- 3_TARGET_SCAN
+--========================================================--
+do
+    local BLOCK = "3_TARGET_SCAN"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local Players     = game:GetService("Players")
+        local RunService  = game:GetService("RunService")
+        local LocalPlayer = Players.LocalPlayer
+
+        local function Classify(plr)
+            if not plr or plr == LocalPlayer then return "self" end
+            local team = plr.Team
+            if not team then return "unknown" end
+
+            local cfg  = _G.vanz.TeamCfg
+            local name = string.lower(team.Name or "")
+            for _, kw in ipairs(cfg.enemyKeywords) do
+                if string.find(name, kw, 1, true) then return "enemy" end
+            end
+            for _, kw in ipairs(cfg.allyKeywords) do
+                if string.find(name, kw, 1, true) then return "ally" end
+            end
+            local tc = team.TeamColor
+            local c  = tc and tc.Color
+            if c then
+                if c.R >= cfg.enemyR and c.G < 0.45 and c.B < 0.45 then return "enemy" end
+                if c.B >= cfg.allyB then return "ally" end
+            end
+            return "unknown"
+        end
+
+        local function GetRoot(plr)
+            local char = plr and plr.Character
+            if not char then return nil end
+            return char:FindFirstChild("UpperTorso")
+                or char:FindFirstChild("HumanoidRootPart")
+                or char:FindFirstChild("Torso")
+        end
+
+        if _G.vanz.Runtime.ScanConn then
+            _G.vanz.Runtime.ScanConn:Disconnect()
+        end
+
+        _G.vanz.Runtime.ScanConn = RunService.RenderStepped:Connect(function()
+            if not (_G.vanz.Settings.VisualLine
+                 or _G.vanz.Settings.FireButton) then
+                return
+            end
+
+            local myRoot = GetRoot(LocalPlayer)
+            if not myRoot then
+                _G.vanz.Runtime.Target = nil
+                return
+            end
+
+            local bestDist, best = math.huge, nil
+            local myPos = myRoot.Position
+
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if Classify(plr) == "enemy" then
+                    local root = GetRoot(plr)
+                    if root then
+                        local d = (root.Position - myPos).Magnitude
+                        if d < bestDist then
+                            bestDist, best = d, plr
+                        end
+                    end
+                end
+            end
+
+            _G.vanz.Runtime.Target = best
+        end)
+
+        print("[VANZ] TargetScan ready.")
+    end, handler)
+end
+
+--========================================================--
+-- 4_VELOCITY_TRACKER
+--========================================================--
+do
+    local BLOCK = "4_VELOCITY_TRACKER"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local Players    = game:GetService("Players")
+        local RunService = game:GetService("RunService")
+
+        _G.vanz.Runtime.VelTracker = _G.vanz.Runtime.VelTracker or {}
+
+        local SAMPLE_WINDOW = 0.05
+        local MAX_SAMPLES   = 30
+        local SMOOTH_ALPHA  = 0.68
+
+        local function GetRoot(plr)
+            local char = plr and plr.Character
+            if not char then return nil end
+            return char:FindFirstChild("HumanoidRootPart")
+                or char:FindFirstChild("UpperTorso")
+                or char:FindFirstChild("Torso")
+        end
+
+        local function Sample(plr, maxDist, myPos)
+            local root = GetRoot(plr)
+            if not root then return end
+
+            if maxDist and myPos then
+                local d = (root.Position - myPos).Magnitude
+                if d > maxDist then
+                    _G.vanz.Runtime.VelTracker[plr] = nil
+                    return
+                end
+            end
+
+            local now = tick()
+            local pos = root.Position
+
+            local tracker = _G.vanz.Runtime.VelTracker[plr]
+            if not tracker then
+                tracker = {
+                    samples        = {},
+                    smoothVel      = Vector3.zero,
+                    lastSpeed      = 0,
+                    lastPos        = pos,
+                    unchangedCount = 0,
+                }
+                _G.vanz.Runtime.VelTracker[plr] = tracker
+            end
+
+            if (pos - tracker.lastPos).Magnitude < 0.05 then
+                tracker.unchangedCount = tracker.unchangedCount + 1
+                if tracker.unchangedCount > 3 then
+                    tracker.smoothVel = Vector3.zero
+                    tracker.lastSpeed = 0
+                    return
+                end
+            else
+                tracker.unchangedCount = 0
+            end
+            tracker.lastPos = pos
+
+            table.insert(tracker.samples, { t = now, pos = pos })
+            while #tracker.samples > MAX_SAMPLES do
+                table.remove(tracker.samples, 1)
+            end
+
+            while #tracker.samples > 2
+            and (now - tracker.samples[1].t) > SAMPLE_WINDOW do
+                table.remove(tracker.samples, 1)
+            end
+
+            if #tracker.samples >= 2 then
+                local oldest = tracker.samples[1]
+                local newest = tracker.samples[#tracker.samples]
+                local dt = newest.t - oldest.t
+
+                if dt > 0.003 then
+                    local instVel = (newest.pos - oldest.pos) / dt
+                    tracker.smoothVel = tracker.smoothVel:Lerp(instVel, SMOOTH_ALPHA)
+                    tracker.lastSpeed = tracker.smoothVel.Magnitude
+                end
+            end
+        end
+
+        if _G.vanz.Runtime.VelConn then
+            _G.vanz.Runtime.VelConn:Disconnect()
+        end
+
+        _G.vanz.Runtime.VelConn = RunService.RenderStepped:Connect(function()
+            if not (_G.vanz.Settings.VisualLine
+                 or _G.vanz.Settings.FireButton
+                 or _G.vanz.Settings.LeadPredict) then
+                return
+            end
+
+            local lp = Players.LocalPlayer
+            local myChar = lp.Character
+            local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+            local myPos = myRoot and myRoot.Position
+            local maxDist = _G.vanz.AimCfg.maxScanDistance or 999
+
+            for _, plr in ipairs(Players:GetPlayers()) do
+                if plr ~= lp then
+                    Sample(plr, maxDist, myPos)
+                end
+            end
+        end)
+
+        _G.vanz.SampleNow = function(plr)
+            if not plr then return end
+            local lp = Players.LocalPlayer
+            local myRoot = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+            local myPos = myRoot and myRoot.Position
+            Sample(plr, nil, myPos)
+        end
+
+        _G.vanz.GetPlayerVelocity = function(plr)
+            if not plr then return Vector3.zero end
+            local tr = _G.vanz.Runtime.VelTracker[plr]
+            if not tr then return Vector3.zero end
+            return tr.smoothVel
+        end
+
+        _G.vanz.GetPlayerSpeed = function(plr)
+            return _G.vanz.GetPlayerVelocity(plr).Magnitude
+        end
+
+        print(string.format(
+            "[VANZ] VelocityTracker MAX: window=%.3fs samples=%d alpha=%.2f",
+            SAMPLE_WINDOW, MAX_SAMPLES, SMOOTH_ALPHA))
+    end, handler)
+end
+
+--========================================================--
+-- 5_BULLET_CALIB
+--========================================================--
+do
+    local BLOCK = "5_BULLET_CALIB"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local RS = game:GetService("ReplicatedStorage")
+
+        _G.vanz.Runtime.BulletSpeedBySkin = _G.vanz.Runtime.BulletSpeedBySkin or {}
+
+        local function findVB()
+            local ok, res = pcall(function()
+                return RS.Remotes.Items["Twist of Fate"].VisualizeBullet
+            end)
+            return ok and res or nil
+        end
+
+        local vb = findVB()
+        if not vb then
+            warn("[VANZ] VisualizeBullet gak ketemu.")
+            return
+        end
+
+        vb.OnClientEvent:Connect(function(startPos, endPos, speed, skin)
+            if typeof(speed) == "number" and speed > 0 then
+                local key = tostring(skin or "default")
+                _G.vanz.Runtime.BulletSpeedBySkin[key] = speed
+
+                if _G.vanz.AimCfg.bulletSpeedAuto ~= false then
+                    _G.vanz.AimCfg.bulletSpeed = speed
+                end
+            end
+        end)
+
+        print("[VANZ] BulletCalib ready.")
+    end, handler)
+end
+
+--========================================================--
+-- 6_FIRETOF
+--========================================================--
+do
+    local BLOCK = "6_FIRETOF"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local Players     = game:GetService("Players")
+        local LocalPlayer = Players.LocalPlayer
+        local RS          = game:GetService("ReplicatedStorage")
+
+        local function GetGunPart()
+            local char = LocalPlayer.Character
+            if not char then return nil end
+            local tof = char:FindFirstChild("Twist of Fate")
+            if not tof then return nil end
+            local rightArm = tof:FindFirstChild("Right Arm")
+            if not rightArm then return nil end
+            return rightArm:FindFirstChild("gun")
+                or rightArm:FindFirstChildWhichIsA("BasePart", true)
+        end
+
+        local function GetAimOrigin()
+            local char = LocalPlayer.Character
+            if not char then return nil end
+            local mode = _G.vanz.AimCfg.originMode or "gun"
+
+            if mode == "gun" then
+                local gun = GetGunPart()
+                if gun and gun:IsA("BasePart") then return gun.Position end
+            end
+            if mode == "head" then
+                local head = char:FindFirstChild("Head")
+                if head and head:IsA("BasePart") then return head.Position end
+            end
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+                or char:FindFirstChild("UpperTorso")
+                or char:FindFirstChild("Torso")
+            return hrp and hrp.Position or nil
+        end
+
+        local function GetTargetPart()
+            local tgt = _G.vanz.Runtime.Target
+            if not tgt then return nil end
+            local char = tgt.Character
+            if not char then return nil end
+
+            local mode = _G.vanz.AimCfg.targetMode or "uppertorso"
+            local p
+            if mode == "head" then p = char:FindFirstChild("Head")
+            elseif mode == "torso" then p = char:FindFirstChild("Torso")
+            elseif mode == "hrp" then p = char:FindFirstChild("HumanoidRootPart")
+            else
+                p = char:FindFirstChild("UpperTorso")
+                    or char:FindFirstChild("Torso")
+                    or char:FindFirstChild("HumanoidRootPart")
+                    or char:FindFirstChild("Head")
+            end
+            return (p and p:IsA("BasePart")) and p or nil
+        end
+
+        local function GetBulletSpeed()
+            local s = _G.vanz.AimCfg.bulletSpeed
+            if typeof(s) == "number" and s > 0 then return s end
+            return 200
+        end
+
+        local function GetEffectiveIterations()
+    return _G.vanz.AimCfg.leadIterations or 9999
+end
+
+        local function GetTargetVelocityFresh(plr, part)
+            if _G.vanz.SampleNow and plr then
+                _G.vanz.SampleNow(plr)
+            end
+
+            local directVel = Vector3.zero
+            if part then
+                local ok, av = pcall(function() return part.AssemblyLinearVelocity end)
+                if ok and av then directVel = av end
+                if directVel.Magnitude < 0.05 then
+                    local ok2, v2 = pcall(function() return part.Velocity end)
+                    if ok2 and v2 then directVel = v2 end
+                end
+            end
+
+            local trackerVel = Vector3.zero
+            if _G.vanz.GetPlayerVelocity and plr then
+                trackerVel = _G.vanz.GetPlayerVelocity(plr)
+            end
+
+            local dm = directVel.Magnitude
+            local tm = trackerVel.Magnitude
+
+            if dm > tm * 1.5 then return directVel end
+            if tm > dm * 1.5 then return trackerVel end
+            return (directVel + trackerVel) * 0.5
+        end
+
+        local function PredictTargetPos(origin, rawTarget, velocity)
+            local cfg = _G.vanz.AimCfg
+            if not cfg.leadPrediction then
+                return rawTarget, 0, GetBulletSpeed()
+            end
+
+            local speed = GetBulletSpeed()
+            local iterations = GetEffectiveIterations()
+            local predicted = rawTarget
+            local flightTime = 0
+
+            for i = 1, iterations do
+                local dist = (predicted - origin).Magnitude
+                flightTime = dist / speed
+                predicted = rawTarget + velocity * flightTime
+            end
+
+            return predicted, flightTime, speed
+        end
+
+local function GetTargetDir()
+    local origin = GetAimOrigin()
+    local part   = GetTargetPart()
+    local tgtPlr = _G.vanz.Runtime.Target
+    if not (origin and part and part.Parent) then return nil, nil, nil, nil end
+
+    -- === LATERAL OFFSET (kanan/kiri/atas target) ===
+    local rawTarget = part.Position
+    local off  = _G.vanz.AimCfg.lateralOffset or 0
+    local axis = _G.vanz.AimCfg.lateralAxis or "RightVector"
+    if off ~= 0 then
+        local ok, axisVec = pcall(function() return part.CFrame[axis] end)
+        if ok and axisVec then
+            rawTarget = rawTarget + axisVec * off
+        end
+    end
+
+    local velocity  = GetTargetVelocityFresh(tgtPlr, part)
+
+    local predicted, flightTime, speed =
+        PredictTargetPos(origin, rawTarget, velocity)
+
+    local diff = predicted - origin
+    if diff.Magnitude < 0.01 then return nil, nil, nil, nil end
+
+    local dir = diff.Unit
+    local cfg = _G.vanz.AimCfg
+    if cfg.flipY or cfg.flipZ then
+        dir = Vector3.new(
+            dir.X,
+            cfg.flipY and -dir.Y or dir.Y,
+            cfg.flipZ and -dir.Z or dir.Z
+        )
+    end
+
+    return dir, predicted, flightTime, speed
+end
+
+        local function GetFireRemote()
+            local remotes = RS:FindFirstChild("Remotes")
+            if not remotes then return nil end
+            local items = remotes:FindFirstChild("Items")
+            if not items then return nil end
+            local tof = items:FindFirstChild("Twist of Fate")
+            if not tof then return nil end
+            return tof:FindFirstChild("Fire")
+        end
+
+        _G.vanz.FireTof = function()
+    local gun  = GetGunPart()
+    local fire = GetFireRemote()
+    local dir  = GetTargetDir()
+
+    if not gun then warn("[VANZ][FireTof] gun nil.") return end
+    if not fire then warn("[VANZ][FireTof] remote nil.") return end
+    if not dir then warn("[VANZ][FireTof] target kosong.") return end
+
+    local ok, err = pcall(function()
+        fire:FireServer(gun, dir)
+    end)
+
+    if not ok then warn("[VANZ][FireTof] err: " .. tostring(err)) end
+end
+
+        _G.vanz.Events.FireButton = function(enabled)
+            if _G.vanz.Runtime.FireButton then
+                _G.vanz.Runtime.FireButton.Visible = enabled
+            end
+        end
+
+        _G.vanz.Events.LeadPredict = function(enabled)
+            _G.vanz.AimCfg.leadPrediction = enabled
+        end
+
+        print("[VANZ] FireTof READY (MAX).")
+    end, handler)
+end
+
+--========================================================--
+-- 7_ANTI_KNOCK
+--========================================================--
+do
+    local BLOCK = "7_ANTI_KNOCK"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local Players    = game:GetService("Players")
+        local RunService = game:GetService("RunService")
+        local LocalPlayer = Players.LocalPlayer
+
+        local RS = game:GetService("ReplicatedStorage")
+        local EnableCollision
+        pcall(function() EnableCollision = RS.Remotes.Collision.EnableCollision end)
+
+        if _G.vanz.Runtime.GuardConn then
+            _G.vanz.Runtime.GuardConn:Disconnect()
+        end
+
+        local lastFire = 0
+        local lastHealth = nil
+
+        _G.vanz.Runtime.GuardConn = RunService.Heartbeat:Connect(function()
+            if not _G.vanz.Settings.AntiKnock then return end
+            local char = LocalPlayer.Character
+            if not char then return end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if not hum then return end
+
+            local now = tick()
+            local isKnocked = false
+            if lastHealth and (lastHealth - hum.Health) >= 15 then
+                isKnocked = true
+            end
+            lastHealth = hum.Health
+
+            local shouldFire = isKnocked or (now - lastFire >= 2)
+            if shouldFire and EnableCollision then
+                lastFire = now
+                pcall(function() EnableCollision:FireServer() end)
+            end
+        end)
+    end, handler)
+end
+
+--========================================================--
+-- 8_ANTI_DEATH
+--========================================================--
+do
+    local BLOCK = "8_ANTI_DEATH"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local Players    = game:GetService("Players")
+        local RunService = game:GetService("RunService")
+        local LocalPlayer = Players.LocalPlayer
+
+        local RS = game:GetService("ReplicatedStorage")
+        local HealEvent
+        pcall(function() HealEvent = RS.Remotes.Healing.HealEvent end)
+
+        if _G.vanz.Runtime.DeathConn then
+            _G.vanz.Runtime.DeathConn:Disconnect()
+        end
+
+        local lastSpam = 0
+        local SPAM_INTERVAL = 0.35
+
+        _G.vanz.Runtime.DeathConn = RunService.Heartbeat:Connect(function()
+            if not _G.vanz.Settings.AntiDeath then return end
+            local char = LocalPlayer.Character
+            if not char then return end
+            local hum  = char:FindFirstChildOfClass("Humanoid")
+            local hrp  = char:FindFirstChild("HumanoidRootPart")
+            if not (hum and hrp) then return end
+
+            if hum.Health > 0 and hum.Health <= 30 then
+                local now = tick()
+                if now - lastSpam >= SPAM_INTERVAL then
+                    lastSpam = now
+                    if HealEvent then
+                        pcall(function() HealEvent:FireServer(hrp, true) end)
+                    end
+                end
+            end
+        end)
+    end, handler)
+end
+
+--========================================================--
+-- 9_AUTO_HEAL
+--========================================================--
+do
+    local BLOCK = "9_AUTO_HEAL"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local Players    = game:GetService("Players")
+        local RunService = game:GetService("RunService")
+        local LocalPlayer = Players.LocalPlayer
+
+        local RS = game:GetService("ReplicatedStorage")
+        local HealEvent
+        pcall(function() HealEvent = RS.Remotes.Healing.HealEvent end)
+
+        if _G.vanz.Runtime.HealConn then
+            _G.vanz.Runtime.HealConn:Disconnect()
+        end
+
+        local last = 0
+        local INTERVAL = 0.6
+
+        _G.vanz.Runtime.HealConn = RunService.Heartbeat:Connect(function()
+            if not _G.vanz.Settings.AutoHeal then return end
+            local char = LocalPlayer.Character
+            if not char then return end
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if not (hum and hrp) then return end
+
+            if hum.Health > 0 and hum.Health < hum.MaxHealth * 0.6 then
+                local now = tick()
+                if now - last >= INTERVAL then
+                    last = now
+                    if HealEvent then
+                        pcall(function() HealEvent:FireServer(hrp, true) end)
+                    end
+                end
+            end
+        end)
+    end, handler)
+end
+
+--========================================================--
+-- 10_VISUAL_LINE
+--========================================================--
+do
+    local BLOCK = "10_VISUAL_LINE"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local Players     = game:GetService("Players")
+        local RunService  = game:GetService("RunService")
+        local LocalPlayer = Players.LocalPlayer
+
+        local hasDrawing = (type(Drawing) == "table" and type(Drawing.new) == "function")
+        if not hasDrawing then warn("[VANZ] Drawing gak ada.") return end
+
+        local line = Drawing.new("Line")
+        line.Visible = false
+        line.Color = Color3.fromRGB(255, 55, 55)
+        line.Thickness = 2
+        line.Transparency = 1
+        line.From = Vector2.new(0, 0)
+        line.To   = Vector2.new(0, 0)
+        _G.vanz.Runtime.DrawLine = line
+
+        local dot = Drawing.new("Circle")
+        dot.Visible = false
+        dot.Color = Color3.fromRGB(255, 55, 55)
+        dot.Thickness = 2
+        dot.Radius = 6
+        dot.Filled = false
+        dot.Transparency = 1
+        _G.vanz.Runtime.DrawDot = dot
+
+        local rawDot = Drawing.new("Circle")
+        rawDot.Visible = false
+        rawDot.Color = Color3.fromRGB(255, 200, 0)
+        rawDot.Thickness = 1
+        rawDot.Radius = 4
+        rawDot.Filled = false
+        rawDot.Transparency = 0.6
+        _G.vanz.Runtime.DrawRawDot = rawDot
+
+        local function Project(worldPos, cam)
+            local vp = cam.ViewportSize
+            local cx, cy = vp.X * 0.5, vp.Y * 0.5
+            local sp = cam:WorldToViewportPoint(worldPos)
+            if sp.Z > 0 then return Vector2.new(sp.X, sp.Y) end
+            local dx, dy = cx - sp.X, cy - sp.Y
+            local len = math.sqrt(dx*dx + dy*dy)
+            if len < 1 then return Vector2.new(cx, cy + 2000) end
+            local scale = 3000 / len
+            return Vector2.new(cx + dx*scale, cy + dy*scale)
+        end
+
+        local function GetGunPos()
+            local char = LocalPlayer.Character
+            if not char then return nil end
+            local tof = char:FindFirstChild("Twist of Fate")
+            if tof then
+                local rightArm = tof:FindFirstChild("Right Arm")
+                if rightArm then
+                    local muzzle = rightArm:FindFirstChild("gun")
+                        or rightArm:FindFirstChildWhichIsA("BasePart", true)
+                    if muzzle and muzzle:IsA("BasePart") then
+                        return muzzle.Position
+                    end
+                end
+            end
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            return hrp and (hrp.Position + Vector3.new(0,1,0)) or nil
+        end
+
+local function GetTargetData()
+    local tgt = _G.vanz.Runtime.Target
+    if not tgt then return nil, nil end
+    local char = tgt.Character
+    if not char then return nil, nil end
+    local part = char:FindFirstChild("UpperTorso")
+        or char:FindFirstChild("Torso")
+        or char:FindFirstChild("HumanoidRootPart")
+        or char:FindFirstChild("Head")
+    if not (part and part:IsA("BasePart") and part.Parent) then return nil, nil end
+
+    -- === LATERAL OFFSET (sinkron dengan FireTof) ===
+    local rawPos = part.Position
+    local off  = _G.vanz.AimCfg.lateralOffset or 0
+    local axis = _G.vanz.AimCfg.lateralAxis or "RightVector"
+    if off ~= 0 then
+        local ok, axisVec = pcall(function() return part.CFrame[axis] end)
+        if ok and axisVec then
+            rawPos = rawPos + axisVec * off
+        end
+    end
+
+    local origin = GetGunPos()
+    if not origin then return rawPos, rawPos end
+
+    local cfg = _G.vanz.AimCfg
+    local speed = cfg.bulletSpeed
+    if typeof(speed) ~= "number" or speed <= 0 then speed = 200 end
+
+    local vel = _G.vanz.GetPlayerVelocity and _G.vanz.GetPlayerVelocity(tgt) or Vector3.zero
+
+    if not cfg.leadPrediction then
+        return rawPos, rawPos
+    end
+
+    local iter = cfg.leadIterations or 9999
+    local predicted = rawPos
+    for i = 1, iter do
+        local dist = (predicted - origin).Magnitude
+        local t = dist / speed
+        predicted = rawPos + vel * t
+    end
+
+    return rawPos, predicted
+end
+
+        if _G.vanz.Runtime.LineConn then
+            _G.vanz.Runtime.LineConn:Disconnect()
+        end
+
+        _G.vanz.Runtime.LineConn = RunService.RenderStepped:Connect(function()
+            if not _G.vanz.Settings.VisualLine then
+                line.Visible = false; dot.Visible = false; rawDot.Visible = false
+                return
+            end
+
+            local gunPos = GetGunPos()
+            local rawPos, predPos = GetTargetData()
+            local cam = workspace.CurrentCamera
+
+            if not (gunPos and predPos and cam) then
+                line.Visible = false; dot.Visible = false; rawDot.Visible = false
+                return
+            end
+
+            line.From = Project(gunPos, cam)
+            line.To   = Project(predPos, cam)
+            line.Visible = true
+
+            dot.Position = Project(predPos, cam)
+            dot.Visible = true
+
+            if rawPos then
+                rawDot.Position = Project(rawPos, cam)
+                rawDot.Visible = _G.vanz.AimCfg.leadPrediction
+            end
+        end)
+
+        _G.vanz.Events.VisualLine = function(enabled)
+            if not enabled then
+                if _G.vanz.Runtime.DrawLine then _G.vanz.Runtime.DrawLine.Visible = false end
+                if _G.vanz.Runtime.DrawDot then _G.vanz.Runtime.DrawDot.Visible = false end
+                if _G.vanz.Runtime.DrawRawDot then _G.vanz.Runtime.DrawRawDot.Visible = false end
+            end
+        end
+    end, handler)
+end
+
+--========================================================--
+-- 11_HUD_INFO (CENTER-BOTTOM PRO SCANNER)
+--========================================================--
+do
+    local BLOCK = "11_HUD_INFO"
+    local function handler(err)
+        warn(string.format("[VANZ ERROR][%s] %s\n%s",
+            BLOCK, tostring(err), debug.traceback("", 2)))
+    end
+
+    xpcall(function()
+        local RunService = game:GetService("RunService")
+        local Players    = game:GetService("Players")
+        local LocalPlayer = Players.LocalPlayer
+
+        if not (_G.vanz.GUI and _G.vanz.GUI.ScreenGui) then return end
+
+        local Info = Instance.new("TextLabel")
+        Info.Name = "VANZ_INFO"
+        -- Posisi: Tengah Bawah (15 pixel dari batas bawah layar)
+        Info.AnchorPoint = Vector2.new(0.5, 1)
+        Info.Position = UDim2.new(0.5, 0, 1, -15) 
+        Info.Size = UDim2.new(0, 540, 0, 24)
+        Info.BackgroundTransparency = 0.3
+        Info.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+        Info.TextColor3 = Color3.fromRGB(255, 75, 75)
+        Info.TextSize = 10
+        Info.Font = Enum.Font.Code
+        Info.TextXAlignment = Enum.TextXAlignment.Center
+        Info.Text = "[VANZ v8-MAX] INITIALIZING SYSTEM..."
+        Info.ZIndex = 50
+        Info.Parent = _G.vanz.GUI.ScreenGui
+
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(255, 40, 40)
+        stroke.Transparency = 0.5
+        stroke.Thickness = 1
+        stroke.Parent = Info
+
+        Instance.new("UICorner", Info).CornerRadius = UDim.new(0, 6)
+
+        RunService.Heartbeat:Connect(function()
+            local tgt = _G.vanz.Runtime.Target
+            local name = tgt and tgt.Name or "NONE"
+            
+            local distStr = "0m"
+            local hpStr = "N/A"
+            if tgt and tgt.Character then
+                local myChar = LocalPlayer.Character
+                local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+                local tgtRoot = tgt.Character:FindFirstChild("HumanoidRootPart")
+                local hum = tgt.Character:FindFirstChildOfClass("Humanoid")
+                
+                if myRoot and tgtRoot then
+                    local dist = (tgtRoot.Position - myRoot.Position).Magnitude
+                    distStr = string.format("%.1fm", dist)
+                end
+                if hum then
+                    hpStr = string.format("%.0f/%.0f", hum.Health, hum.MaxHealth)
+                end
+            end
+
+            local vel = (_G.vanz.GetPlayerSpeed and tgt)
+                and _G.vanz.GetPlayerSpeed(tgt) or 0
+            local bs = _G.vanz.AimCfg.bulletSpeed
+            local bsStr = (typeof(bs) == "number" and bs > 0)
+                and string.format("%.0f", bs) or "200"
+            
+            local fps = _G.vanz.Runtime.SmoothFPS or 60
+            local iter = _G.vanz.AimCfg.leadIterations or 9999
+            
+            local state = _G.vanz.Settings.SilentAim and "ACTIVE" or "STANDBY"
+            
+            Info.Text = string.format(
+                "SYS:[%s] | TGT: %s | HP: %s | DIST: %s | VEL: %.1f | SPD: %s | ITER: %d | FPS: %.0f",
+                state, name, hpStr, distStr, vel, bsStr, iter, fps
+            )
+        end)
+    end, handler)
+end
