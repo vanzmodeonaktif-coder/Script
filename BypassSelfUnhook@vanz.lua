@@ -1,0 +1,365 @@
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local LP = Players.LocalPlayer
+
+local repairEv = RS:WaitForChild("Remotes"):WaitForChild("Generator"):WaitForChild("RepairEvent")
+
+local S = {
+	enabled = false,
+	closed = false,
+	gen = nil,
+	fired = false,
+	savedCFrame = nil,
+	lerp = 0.35,
+	depth = 20,
+	conns = {},
+	ncSaved = {},
+}
+
+-- ============================================================
+-- GENERATOR DETECTION (dari cheat lo)
+-- ============================================================
+local function HasGenPoint(obj)
+	for _, c in ipairs(obj:GetChildren()) do
+		if c.Name:match("^GeneratorPoint%d+$") then return c end
+	end
+	return nil
+end
+
+local function ScanGenerators()
+	local found = {}
+	local function scan(obj, depth)
+		if depth > 4 then return end
+		for _, ch in ipairs(obj:GetChildren()) do
+			if ch:IsA("Folder") or ch:IsA("Model") then
+				if HasGenPoint(ch) then
+					table.insert(found, ch)
+				else
+					scan(ch, depth + 1)
+				end
+			end
+		end
+	end
+	scan(workspace, 0)
+	return found
+end
+
+local function BuildGenList()
+	local raw = {}
+	for _, gen in ipairs(ScanGenerators()) do
+		for _, c in ipairs(gen:GetChildren()) do
+			local n = tonumber(c.Name:match("^GeneratorPoint(%d+)$") or "")
+			if n and c:IsA("BasePart") then
+				table.insert(raw, {point = c, num = n, model = gen})
+			end
+		end
+	end
+	table.sort(raw, function(a, b) return a.num < b.num end)
+	return raw
+end
+
+-- ============================================================
+-- KILLER DETECTION
+-- ============================================================
+local function killerHRP()
+	local myChar = LP.Character
+	if not myChar then return nil end
+	local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+	if not myHRP then return nil end
+	local best, bestD = nil, math.huge
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= LP and p.Team and LP.Team and p.Team ~= LP.Team then
+			local c = p.Character
+			if c then
+				local h = c:FindFirstChild("HumanoidRootPart")
+				local hum = c:FindFirstChildOfClass("Humanoid")
+				if h and hum and hum.Health > 0 then
+					local d = (h.Position - myHRP.Position).Magnitude
+					if d < bestD then bestD, best = d, h end
+				end
+			end
+		end
+	end
+	return best
+end
+
+-- ============================================================
+-- NO-CLIP
+-- ============================================================
+local function applyNoClip()
+	local c = LP.Character
+	if not c then return end
+	for _, p in ipairs(c:GetDescendants()) do
+		if p:IsA("BasePart") then
+			if S.ncSaved[p] == nil then
+				S.ncSaved[p] = p.CanCollide
+			end
+			p.CanCollide = false
+		end
+	end
+end
+
+local function restoreNoClip()
+	for part, orig in pairs(S.ncSaved) do
+		if part and part.Parent then
+			pcall(function() part.CanCollide = orig end)
+		end
+	end
+	S.ncSaved = {}
+end
+
+-- ============================================================
+-- GUI
+-- ============================================================
+local function getParent()
+	if gethui then local ok, h = pcall(gethui); if ok and h then return h end end
+	return LP:WaitForChild("PlayerGui")
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "KairoRecFrame"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = getParent()
+
+local frame = Instance.new("Frame")
+frame.Name = "KairoRecFrame"
+frame.Size = UDim2.new(0, 280, 0, 130)
+frame.Position = UDim2.new(0, 30, 0, 30)
+frame.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+frame.BorderSizePixel = 0
+frame.Active = true
+frame.Draggable = true
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(60, 200, 120)
+stroke.Thickness = 1
+stroke.Transparency = 0.4
+stroke.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Name = "KairoRecTitle"
+title.Size = UDim2.new(1, -70, 0, 24)
+title.Position = UDim2.new(0, 10, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "Kairo | Repair Escape"
+title.TextColor3 = Color3.fromRGB(60, 200, 120)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 13
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = frame
+
+local minBtn = Instance.new("TextButton")
+minBtn.Name = "KairoRecBtn"
+minBtn.Size = UDim2.new(0, 24, 0, 22)
+minBtn.Position = UDim2.new(1, -54, 0, 1)
+minBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+minBtn.BorderSizePixel = 0
+minBtn.Text = "─"
+minBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 14
+minBtn.AutoButtonColor = false
+minBtn.Parent = frame
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+
+local closeBtn = Instance.new("TextButton")
+closeBtn.Name = "KairoRecBtn"
+closeBtn.Size = UDim2.new(0, 24, 0, 22)
+closeBtn.Position = UDim2.new(1, -28, 0, 1)
+closeBtn.BackgroundColor3 = Color3.fromRGB(120, 30, 30)
+closeBtn.BorderSizePixel = 0
+closeBtn.Text = "✕"
+closeBtn.TextColor3 = Color3.fromRGB(255, 220, 220)
+closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 13
+closeBtn.AutoButtonColor = false
+closeBtn.Parent = frame
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
+
+local content = Instance.new("Frame")
+content.Name = "KairoRecFrame"
+content.Size = UDim2.new(1, 0, 1, -26)
+content.Position = UDim2.new(0, 0, 0, 26)
+content.BackgroundTransparency = 1
+content.Parent = frame
+
+local btn = Instance.new("TextButton")
+btn.Name = "KairoRecBtn"
+btn.Size = UDim2.new(1, -20, 0, 36)
+btn.Position = UDim2.new(0, 10, 0, 4)
+btn.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+btn.BorderSizePixel = 0
+btn.Text = "Escape: OFF"
+btn.TextColor3 = Color3.fromRGB(220, 220, 220)
+btn.Font = Enum.Font.GothamMedium
+btn.TextSize = 13
+btn.AutoButtonColor = false
+btn.Parent = content
+Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+local info = Instance.new("TextLabel")
+info.Name = "KairoRecInfo"
+info.Size = UDim2.new(1, -20, 0, 50)
+info.Position = UDim2.new(0, 10, 0, 44)
+info.BackgroundTransparency = 1
+info.Text = "idle"
+info.TextColor3 = Color3.fromRGB(160, 160, 180)
+info.Font = Enum.Font.Code
+info.TextSize = 11
+info.TextXAlignment = Enum.TextXAlignment.Left
+info.TextYAlignment = Enum.TextYAlignment.Top
+info.Parent = content
+
+local function setBtn(on)
+	if on then
+		btn.Text = "Escape: ON"
+		btn.BackgroundColor3 = Color3.fromRGB(90, 28, 28)
+		stroke.Color = Color3.fromRGB(255, 90, 90)
+	else
+		btn.Text = "Escape: OFF"
+		btn.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
+		stroke.Color = Color3.fromRGB(60, 200, 120)
+	end
+end
+
+-- ============================================================
+-- HEARTBEAT FOLLOW
+-- ============================================================
+local hbConn = RunService.Heartbeat:Connect(function()
+	if S.closed or not S.enabled or not S.fired then return end
+
+	local c = LP.Character
+	if not c then return end
+	local hrp = c:FindFirstChild("HumanoidRootPart")
+	local hum = c:FindFirstChildOfClass("Humanoid")
+	if not hrp or not hum then return end
+
+	if hrp.Anchored then hrp.Anchored = false end
+	if hum.PlatformStand then hum.PlatformStand = false end
+	if hum.WalkSpeed < 16 then hum.WalkSpeed = 16 end
+
+	applyNoClip()
+
+	local k = killerHRP()
+	if k then
+		local target = k.Position + Vector3.new(0, -S.depth, 0)
+		local goal = CFrame.new(target, target + k.CFrame.LookVector)
+		hrp.CFrame = hrp.CFrame:Lerp(goal, S.lerp)
+		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		info.Text = string.format("follow | dist=%.1f depth=%d\nnc=%d",
+			(k.Position - hrp.Position).Magnitude,
+			S.depth,
+			(function() local n=0 for _ in pairs(S.ncSaved) do n=n+1 end return n end)())
+	else
+		info.Text = "no killer"
+	end
+end)
+table.insert(S.conns, hbConn)
+
+-- ============================================================
+-- FIRE PATTERN T-F-T-F
+-- ============================================================
+local function firePattern()
+	local gen = S.gen
+	if not gen then
+		info.Text = "no generator point"
+		return
+	end
+	task.spawn(function()
+		pcall(function() repairEv:FireServer(gen, true) end)
+		task.wait(0.06)
+		pcall(function() repairEv:FireServer(gen, false) end)
+		task.wait(0.06)
+		pcall(function() repairEv:FireServer(gen, true) end)
+		task.wait(0.06)
+		pcall(function() repairEv:FireServer(gen, false) end)
+		S.fired = true
+	end)
+end
+
+-- ============================================================
+-- ON / OFF
+-- ============================================================
+local function saveCF()
+	local c = LP.Character
+	if not c then return end
+	local hrp = c:FindFirstChild("HumanoidRootPart")
+	if hrp then S.savedCFrame = hrp.CFrame end
+end
+
+local function restoreCF()
+	if not S.savedCFrame then return end
+	local c = LP.Character
+	if not c then return end
+	local hrp = c:FindFirstChild("HumanoidRootPart")
+	if hrp then
+		pcall(function() hrp.Anchored = false end)
+		hrp.CFrame = S.savedCFrame
+		hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+	end
+end
+
+btn.MouseButton1Click:Connect(function()
+	S.enabled = not S.enabled
+	setBtn(S.enabled)
+	if S.enabled then
+		local list = BuildGenList()
+		S.gen = list[1] and list[1].point or nil
+		if not S.gen then
+			for _, d in ipairs(workspace:GetDescendants()) do
+				if d:IsA("BasePart") and d.Name:match("^GeneratorPoint%d+$") then
+					S.gen = d
+					break
+				end
+			end
+		end
+		info.Text = S.gen and ("found: "..S.gen:GetFullName()) or "no generator"
+		S.fired = false
+		saveCF()
+		firePattern()
+	else
+		S.fired = false
+		task.wait(0.1)
+		restoreCF()
+		restoreNoClip()
+	end
+end)
+
+-- ============================================================
+-- MINIMIZE
+-- ============================================================
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	content.Visible = not minimized
+	frame.Size = minimized and UDim2.new(0, 280, 0, 26) or UDim2.new(0, 280, 0, 130)
+	minBtn.Text = minimized and "□" or "─"
+end)
+
+-- ============================================================
+-- CLOSE — PAKSA MATI, CLEAN
+-- ============================================================
+closeBtn.MouseButton1Click:Connect(function()
+	S.closed = true
+	S.enabled = false
+	S.fired = false
+
+	restoreCF()
+	restoreNoClip()
+
+	for _, c in ipairs(S.conns) do
+		pcall(function() c:Disconnect() end)
+	end
+	S.conns = {}
+
+	pcall(function() gui:Destroy() end)
+
+	S.savedCFrame = nil
+	S.gen = nil
+end)
+
+print("[Kairo] Repair Escape v3 ready.")
