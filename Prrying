@@ -1,0 +1,1288 @@
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local RepStore   = game:GetService("ReplicatedStorage")
+local VIM        = game:GetService("VirtualInputManager")
+
+local LP       = Players.LocalPlayer
+local GUI_NAME = "VANZ_AUTO_PARRY"
+local MAX_VISUAL_RADIUS = 1024
+
+-- Abysswalker Slash ID (Bukan buat parry, tapi buat jongkok)
+local ABYSS_SLASH_ID = "100014992013740"
+
+-- Daftar Lunge yang HARUS di-Parry
+local LUNGE_IDS = {
+    ["127417297154354"]=true, ["129626174716003"]=true, ["135002183282873"]=true,
+    ["105374834496520"]=true, ["117042998468241"]=true, ["93902163029544"] =true,
+    ["104540716539347"]=true, ["113255068724446"]=true, ["98163597193511"] =true,
+    ["125430111937587"]=true, ["84926129581106"] =true,
+    ["138720291317243"]=true, ["115244153053858"]=true,
+}
+
+local State = { autoParry = true, silentParry = true, visualRadius = true, radius = 15, dot = 0.5 }
+
+local ServerCD_EndTime = 0
+local isCrouchSequenceActive = false
+
+local Debug = {
+    killerCount = 0, hooked = false, animatorPath = "-",
+    lastAnimId = "-", lastAnimAgo = 0,
+    distance = -1, facing = 0, wallHit = "-",
+    triggerAttempts = 0, triggerOk = 0, triggerFail = 0,
+    lastResult = "-", lastError = "-",
+    btnPath = "-", btnConns = 0, lastFireMethod = "-",
+    lastTriggerAt = 0, lastTriggerReason = "-",
+    nudge = "-", cdRemaining = 0,
+}
+
+local hui = (gethui and gethui()) or game:GetService("CoreGui")
+local existing = hui:FindFirstChild(GUI_NAME)
+if existing then pcall(function() existing:Destroy() end) end
+local oldRing = workspace:FindFirstChild(GUI_NAME .. "_RING")
+if oldRing then pcall(function() oldRing:Destroy() end) end
+
+-- ============ LISTEN CD DARI SERVER ============
+pcall(function()
+    local remotes = RepStore:WaitForChild("Remotes", 5)
+    if not remotes then return end
+    local items = remotes:WaitForChild("Items", 5)
+    if not items then return end
+    local dagger = items:WaitForChild("Parrying Dagger", 5)
+    if not dagger then return end
+    local pr = dagger:WaitForChild("parryResult", 5)
+    if not pr then return end
+    
+    pr.OnClientEvent:Connect(function(success, cd, perm, chained, char)
+        Debug.lastResult = ("succ=%s cd=%s perm=%s"):format(
+            tostring(success), tostring(cd), tostring(perm))
+        if success == true then
+            Debug.triggerOk = Debug.triggerOk + 1
+        else
+            Debug.triggerFail = Debug.triggerFail + 1
+        end
+        
+        if typeof(cd) == "number" and cd > 0 then
+            ServerCD_EndTime = tick() + cd
+        end
+    end)
+end)
+
+-- ============ BYPASS ALL STATES (SILENT PARRY) ============
+local function bypassAllStates()
+    if not State.silentParry or not LP.Character then return end
+    local char = LP.Character
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local check = char:FindFirstChild("CheckInterractable")
+    
+    if hrp then
+        pcall(function() game:GetService("CollectionService"):RemoveTag(hrp, "doing action") end)
+    end
+    if check then
+        pcall(function() check:SetAttribute("isVaulting", false) end)
+        pcall(function() check:SetAttribute("isRepairing", false) end)
+        pcall(function() check:SetAttribute("isHealing", false) end)
+        pcall(function() check:SetAttribute("isUnhooking", false) end)
+    end
+    
+    pcall(function() char:SetAttribute("Trapped", false) end)
+    pcall(function() char:SetAttribute("IsCarried", false) end)
+    pcall(function() char:SetAttribute("IsHooked", false) end)
+    pcall(function() LP:SetAttribute("IsDead", false) end)
+end
+
+-- ============ PARRY BUTTON & HUNTER ============
+local cachedBtn = nil
+local function findParryButtonLive()
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then return nil end
+    for _, folderName in ipairs({"Survivor-mob", "Survivor-con", "Survivor"}) do
+        local folder = pg:FindFirstChild(folderName)
+        if folder then
+            local ctrl = folder:FindFirstChild("Controls")
+            if ctrl then
+                local b = ctrl:FindFirstChild("Gui-mob")
+                if b then return b, folderName .. "/Controls/Gui-mob" end
+            end
+        end
+    end
+    return nil
+end
+local function getParryButton()
+    if cachedBtn then
+        local pg = LP:FindFirstChild("PlayerGui")
+        local ok = pcall(function()
+            return cachedBtn.Parent ~= nil and pg and cachedBtn:IsDescendantOf(pg)
+        end)
+        if ok and cachedBtn.Parent and pg and cachedBtn:IsDescendantOf(pg) then
+            Debug.btnPath = "cached"
+            return cachedBtn
+        end
+    end
+    local b, path = findParryButtonLive()
+    cachedBtn = b
+    Debug.btnPath = b and path or "not found"
+    return b
+end
+
+task.spawn(function()
+    while task.wait(1) do
+        local liveBtn = findParryButtonLive()
+        if liveBtn then
+            cachedBtn = liveBtn
+            Debug.btnPath = "auto-found"
+        end
+    end
+end)
+
+-- ============ AUTO-TRIGGER PARRY (UPDATED METHOD) ============
+local lastTriggerAt = 0
+local function triggerParry(reason)
+    if tick() < ServerCD_EndTime then
+        Debug.lastError = string.format("on CD (%.1fs)", ServerCD_EndTime - tick())
+        return false
+    end
+
+    Debug.triggerAttempts = Debug.triggerAttempts + 1
+    Debug.lastTriggerAt = tick()
+    Debug.lastTriggerReason = tostring(reason or "-")
+
+    lastTriggerAt = tick()
+
+    local pg = LP:FindFirstChild("PlayerGui")
+    if not pg then
+        Debug.lastError = "no PlayerGui"
+        return false
+    end
+
+    local survivorMob = pg:FindFirstChild("Survivor-mob")
+    if not survivorMob then
+        Debug.lastError = "no Survivor-mob"
+        return false
+    end
+
+    local controls = survivorMob:FindFirstChild("Controls")
+    if not controls then
+        Debug.lastError = "no Controls"
+        return false
+    end
+
+    local btn = controls:FindFirstChild("Gui-mob")
+    if not btn then
+        Debug.lastError = "no Gui-mob"
+        return false
+    end
+
+    bypassAllStates()
+
+    if not getconnections or not getupvalues then
+        Debug.lastError = "no exploit fn"
+        return false
+    end
+
+    local okConns, conns = pcall(getconnections, btn.MouseButton1Down)
+    if not okConns or not conns or not conns[1] then
+        Debug.lastError = "no conns"
+        return false
+    end
+
+    local conn = conns[1]
+    local okUps, ups = pcall(getupvalues, conn.Function)
+    if not okUps or not ups then
+        Debug.lastError = "no upvalues"
+        return false
+    end
+
+    local inst = nil
+    for _, uv in ipairs(ups) do
+        if type(uv) == "table" and type(uv.Parry) == "function" then
+            inst = uv
+            break
+        end
+    end
+
+    if not inst then
+        Debug.lastError = "no inst Parry"
+        return false
+    end
+
+    -- Cek CanUse
+    local okCan, can = pcall(inst.CanUse, inst)
+    if not okCan or not can then
+        Debug.lastError = "CanUse=false"
+        return false
+    end
+
+    -- Eksekusi Parry Mentah
+    local ok, err = pcall(function()
+        inst:Parry()
+    end)
+
+    if ok then
+        Debug.lastFireMethod = "MethodCall:Parry"
+        Debug.lastError = "-"
+        return true
+    else
+        Debug.lastError = "call err: " .. tostring(err)
+        return false
+    end
+end
+
+-- ============ AUTO-TRIGGER CROUCH (METHOD CALL) ============
+local function triggerCrouch()
+    local btn
+    local pg = LP:FindFirstChild("PlayerGui")
+    if pg then
+        local folder = pg:FindFirstChild("Survivor-mob")
+        if folder then
+            local ctrl = folder:FindFirstChild("Controls")
+            if ctrl then
+                btn = ctrl:FindFirstChild("crouch")
+            end
+        end
+    end
+
+    if not btn then return end
+    if not getconnections or not getupvalues then return end
+
+    local instance = nil
+
+    local okConns, conns = pcall(getconnections, btn.MouseButton1Click)
+    if not okConns or not conns then return end
+
+    for _, c in ipairs(conns) do
+        if c.Enabled ~= false then
+            local ok, ups = pcall(getupvalues, c.Function)
+            if ok and ups then
+                for _, uv in ipairs(ups) do
+                    if type(uv) == "table" then
+                        if type(uv._setCrouching) == "function" then
+                            instance = uv
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        if instance then break end
+    end
+
+    if not instance then return end
+
+    pcall(function()
+        if instance.isCtrlHeld or (instance.humanoid.Health <= 59 or (not instance:_isGrounded() or (instance:_getActiveAction() or instance.character:GetAttribute("Rooted")))) then
+            instance.isCtrlHeld = false
+            instance.character:SetAttribute("Crouching", false)
+            instance.changeatt:FireServer("Crouchingserver", false)
+            if instance._checkConditions then instance:_checkConditions() end
+            instance.humanoid:ChangeState(Enum.HumanoidStateType.Landed)
+            if instance._refreshMobileButtons then instance:_refreshMobileButtons() end
+        else
+            instance.isCtrlHeld = true
+            instance.isShiftHeld = false
+            if instance._syncSprint then instance:_syncSprint() end
+            instance.character:SetAttribute("Crouching", true)
+            instance.changeatt:FireServer("Crouchingserver", true)
+            instance.runevent:FireServer(instance.character, false)
+            if instance._checkConditions then instance:_checkConditions() end
+            instance.humanoid:ChangeState(Enum.HumanoidStateType.Landed)
+            if instance._refreshMobileButtons then instance:_refreshMobileButtons() end
+        end
+    end)
+end
+
+-- ============ KILLER HOOK ============
+local currentKiller  = nil
+local killerHookConn = nil
+local hookedAnimator = nil
+local activeTrackerToken = 0
+
+local function unhookKiller()
+    if killerHookConn then pcall(function() killerHookConn:Disconnect() end) end
+    killerHookConn = nil
+    currentKiller  = nil
+    hookedAnimator = nil
+    Debug.hooked = false
+    Debug.animatorPath = "-"
+    activeTrackerToken = activeTrackerToken + 1
+end
+
+local function findLiveKiller()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP then
+            local c = p.Character
+            if c and c.Parent and c:FindFirstChild("Lookscriptkiller", true) then
+                return c
+            end
+        end
+    end
+    return nil
+end
+
+-- ============ LOS FILTERS ============
+local NON_WALL_NAMES = {
+    hitbox=true, hitboxes=true, weapon=true, weaponhitbox=true, stunshove=true,
+    rushvfx=true, vfxdebris=true, vfx=true, effect=true, effects=true, fx=true,
+}
+local function nameIsNonWall(name)
+    if not name then return false end
+    return NON_WALL_NAMES[string.lower(name)] == true
+end
+local function hasHumanoidAncestor(inst)
+    local model = inst:FindFirstAncestorOfClass("Model")
+    while model do
+        if model:FindFirstChildOfClass("Humanoid") then return true end
+        model = model:FindFirstAncestorOfClass("Model")
+        if model and model.Parent == workspace then break end
+    end
+    return false
+end
+local function isNonWallHit(inst, killerChar)
+    if not inst then return true end
+    if killerChar and inst:IsDescendantOf(killerChar) then return true end
+    for _, p in ipairs(Players:GetPlayers()) do
+        local c = p.Character
+        if c and inst:IsDescendantOf(c) then return true end
+    end
+    if hasHumanoidAncestor(inst) then return true end
+    if nameIsNonWall(inst.Name) then return true end
+    local anc = inst.Parent
+    while anc and anc ~= workspace do
+        if nameIsNonWall(anc.Name) then return true end
+        anc = anc.Parent
+    end
+    return false
+end
+local function buildRayFilter(myChar, killerChar)
+    local list = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        local c = p.Character
+        if c then table.insert(list, c) end
+    end
+    if myChar then table.insert(list, myChar) end
+    if killerChar then table.insert(list, killerChar) end
+    for _, n in ipairs({"Hitboxes","Hitbox","VFX","Vfx","Effects","FX"}) do
+        local f = workspace:FindFirstChild(n)
+        if f then table.insert(list, f) end
+    end
+    return list
+end
+
+-- ============ LUNGE TRACKER (0.55 SEC WINDOW) ============
+local function trackLungeWindow(killerChar, lungeId, myToken)
+    local startTime = tick()
+    local timeout = 0.55
+    local hasParried = false
+    
+    while tick() - startTime < timeout do
+        if activeTrackerToken ~= myToken or not killerChar or not killerChar.Parent then return end
+        
+        local myChar = LP.Character
+        if not myChar then return end
+        
+        local kHRP = killerChar:FindFirstChild("HumanoidRootPart")
+        local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+        local myHum = myChar:FindFirstChildOfClass("Humanoid")
+        if not kHRP or not myHRP or not myHum then return end
+        
+        local delta = myHRP.Position - kHRP.Position
+        local dist = delta.Magnitude
+        Debug.distance = dist
+        
+        if dist <= State.radius then
+            local toMe = delta.Unit
+            local fdot = kHRP.CFrame.LookVector:Dot(toMe)
+            Debug.facing = fdot
+            
+            if fdot >= State.dot then
+                local rp = RaycastParams.new()
+                rp.FilterType = Enum.RaycastFilterType.Exclude
+                rp.FilterDescendantsInstances = buildRayFilter(myChar, killerChar)
+                local wallHit = workspace:Raycast(myHRP.Position, kHRP.Position - myHRP.Position, rp)
+                
+                local isWall = false
+                if wallHit and wallHit.Instance then
+                    if not isNonWallHit(wallHit.Instance, killerChar) then
+                        isWall = true
+                        Debug.wallHit = wallHit.Instance:GetFullName()
+                    end
+                end
+                
+                if not isWall then
+                    Debug.lastError = "tracker: caught!"
+                    triggerParry("tracker:"..lungeId)
+                    hasParried = true
+                    return
+                end
+            end
+        end
+        RunService.Heartbeat:Wait()
+    end
+    
+    if not hasParried then
+        Debug.lastError = "tracker: expired"
+    end
+end
+
+local function handleAnim(track)
+    if not State.autoParry then
+        Debug.lastError = "autoParry off"
+        return
+    end
+    local anim = track.Animation
+    if not anim then return end
+    local id = string.match(anim.AnimationId or "", "%d+")
+    if not id then return end
+    Debug.lastAnimId = id
+    Debug.lastAnimAgo = tick()
+    
+    local killerChar = currentKiller
+    if not killerChar or not killerChar.Parent then return end
+
+    local myChar = LP.Character
+    if not myChar then return end
+    local myHRP = myChar:FindFirstChild("HumanoidRootPart")
+    local kHRP = killerChar:FindFirstChild("HumanoidRootPart")
+    if not myHRP or not kHRP then return end
+
+    local dist = (myHRP.Position - kHRP.Position).Magnitude
+    Debug.distance = dist
+
+    if id == ABYSS_SLASH_ID then
+        if dist <= 30 and not isCrouchSequenceActive then
+            isCrouchSequenceActive = true
+            triggerCrouch()
+            task.delay(3.05, function()
+                triggerCrouch()
+                isCrouchSequenceActive = false
+            end)
+        end
+        return
+    end
+
+    if not LUNGE_IDS[id] then return end
+    
+    if dist <= State.radius then
+        local delta = myHRP.Position - kHRP.Position
+        local toMe = delta.Unit
+        local fdot = kHRP.CFrame.LookVector:Dot(toMe)
+        if fdot >= State.dot then
+            triggerParry("direct_frame:"..id)
+            return
+        end
+    end
+
+    activeTrackerToken = activeTrackerToken + 1
+    local myToken = activeTrackerToken
+    
+    task.spawn(function()
+        trackLungeWindow(killerChar, id, myToken)
+    end)
+end
+
+local function tryHook(killerChar)
+    if not killerChar or not killerChar.Parent then return end
+    local hum = killerChar:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if not animator then animator = killerChar:FindFirstChildOfClass("Animator") end
+    if not animator then animator = killerChar:FindFirstChild("Animator", true) end
+    if not animator then return end
+    if hookedAnimator == animator and killerHookConn then return end
+
+    if killerHookConn then pcall(function() killerHookConn:Disconnect() end) end
+    hookedAnimator = animator
+    Debug.animatorPath = animator:GetFullName()
+    killerHookConn = animator.AnimationPlayed:Connect(function(track)
+        pcall(handleAnim, track)
+    end)
+    Debug.hooked = true
+
+    for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+        task.spawn(function() pcall(handleAnim, track) end)
+    end
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.016)
+        local kchar = findLiveKiller()
+        local count = 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP then
+                local c = p.Character
+                if c and c:FindFirstChild("Lookscriptkiller", true) then
+                    count = count + 1
+                end
+            end
+        end
+        Debug.killerCount = count
+        if kchar then
+            if currentKiller ~= kchar then
+                unhookKiller()
+                currentKiller = kchar
+            end
+            if not killerHookConn then tryHook(kchar) end
+        else
+            if currentKiller then unhookKiller() end
+        end
+    end
+end)
+
+-- ============ MATCH LIFECYCLE & NUDGE ============
+local function resetMatchState()
+    cachedBtn      = nil
+    lastTriggerAt  = 0
+    Debug.lastAnimAgo = 0
+    Debug.lastAnimId = "-"
+    Debug.btnPath  = "-"
+    Debug.btnConns = 0
+    Debug.nudge    = "-"
+    if killerHookConn then pcall(function() killerHookConn:Disconnect() end) end
+    killerHookConn = nil
+    hookedAnimator = nil
+    currentKiller  = nil
+    Debug.hooked = false
+    Debug.animatorPath = "-"
+    activeTrackerToken = activeTrackerToken + 1
+    ServerCD_EndTime = 0
+    isCrouchSequenceActive = false
+end
+
+local function refreshGameState()
+    Debug.nudge = "Waiting Map..."
+    task.spawn(function()
+        local timeout = tick() + 20 
+        while tick() < timeout do
+            if findParryButtonLive() then break end 
+            task.wait(0.2)
+        end
+    end)
+
+    task.spawn(function()
+        task.wait(1.5) 
+        if not findParryButtonLive() then Debug.nudge = "No Btn" return end
+        
+        Debug.nudge = "Refreshing..."
+        local char = LP.Character
+        if not char then return end
+        
+        local dagger = char:FindFirstChild("Parrying Dagger") 
+        if not dagger and LP:FindFirstChild("Backpack") then
+            dagger = LP:FindFirstChild("Backpack"):FindFirstChild("Parrying Dagger")
+        end
+        
+        if dagger then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                if dagger.Parent == char then
+                    hum:UnequipTools()
+                    task.wait(0.3)
+                    hum:EquipTool(dagger)
+                    task.wait(0.3)
+                else
+                    hum:EquipTool(dagger)
+                    task.wait(0.3)
+                end
+                
+                local oldSpeed = hum.WalkSpeed
+                hum.WalkSpeed = oldSpeed + 0.01
+                task.wait(0.1)
+                hum.WalkSpeed = oldSpeed
+                
+                Debug.nudge = "Refreshed OK"
+            end
+        else
+            Debug.nudge = "No Dagger"
+        end
+    end)
+end
+
+LP.CharacterAdded:Connect(function()
+    resetMatchState()
+    refreshGameState()
+end)
+LP.CharacterRemoving:Connect(function()
+    if cachedBtn then cachedBtn = nil end
+end)
+
+-- ============ VISUAL RING ============
+local ringPart, ringSG, ringFrame, ringStroke
+local function ensureRing()
+    if ringPart and ringPart.Parent then return end
+    ringPart = Instance.new("Part")
+    ringPart.Name         = GUI_NAME .. "_RING"
+    ringPart.Anchored     = true
+    ringPart.CanCollide   = false
+    ringPart.CanQuery     = false
+    ringPart.CanTouch     = false
+    ringPart.CastShadow   = false
+    ringPart.Material     = Enum.Material.SmoothPlastic
+    ringPart.Transparency = 1
+    ringPart.Size         = Vector3.new(2, 0.05, 2)
+    ringPart.Parent       = workspace
+
+    ringSG = Instance.new("SurfaceGui")
+    ringSG.Name           = "RingUI"
+    ringSG.Face           = Enum.NormalId.Top
+    ringSG.AlwaysOnTop    = true
+    ringSG.LightInfluence = 0
+    ringSG.SizingMode     = Enum.SurfaceGuiSizingMode.FixedSize
+    ringSG.CanvasSize     = Vector2.new(1024, 1024)
+    ringSG.Parent         = ringPart
+
+    ringFrame = Instance.new("Frame")
+    ringFrame.Size                   = UDim2.fromScale(1, 1)
+    ringFrame.BackgroundTransparency = 1
+    ringFrame.BorderSizePixel        = 0
+    ringFrame.Parent                 = ringSG
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(1, 0) c.Parent = ringFrame
+
+    ringStroke = Instance.new("UIStroke")
+    ringStroke.Color           = Color3.new(1, 1, 1)
+    ringStroke.Thickness       = 3
+    ringStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    ringStroke.Parent          = ringFrame
+end
+
+local renderConn = RunService.RenderStepped:Connect(function()
+    if not State.visualRadius then
+        if ringSG then ringSG.Enabled = false end
+        return
+    end
+    ensureRing()
+    if not ringPart then return end
+    local myChar = LP.Character
+    if not myChar then ringSG.Enabled = false return end
+    local hrp = myChar:FindFirstChild("HumanoidRootPart")
+    if not hrp then ringSG.Enabled = false return end
+    ringSG.Enabled = true
+
+    local pos = hrp.Position
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = {myChar, ringPart}
+    local hit = workspace:Raycast(pos, Vector3.new(0, -50, 0), rp)
+    local groundY = (hit and hit.Position.Y or (pos.Y - 3)) - 0.1
+    local vr = math.min(State.radius, MAX_VISUAL_RADIUS)
+    if vr < 0.5 then vr = 0.5 end
+    ringPart.Size   = Vector3.new(vr * 2, 0.05, vr * 2)
+    ringPart.CFrame = CFrame.new(pos.X, groundY, pos.Z)
+end)
+
+-- ============ UI ============
+local function makeToggleRow(parent, y, label)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, -20, 0, 30)
+    row.Position = UDim2.new(0, 10, 0, y)
+    row.BackgroundTransparency = 1
+    row.Parent = parent
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -70, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label
+    lbl.TextColor3 = Color3.new(1, 1, 1)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 13
+    lbl.Parent = row
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.fromOffset(56, 24)
+    btn.Position = UDim2.new(1, 0, 0.5, 0)
+    btn.AnchorPoint = Vector2.new(1, 0.5)
+    btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    btn.Text = "OFF"
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.BorderSizePixel = 0
+    btn.Parent = row
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(1, 0) c.Parent = btn
+    return btn
+end
+
+local function refreshToggle(btn, v)
+    btn.Text = v and "ON" or "OFF"
+    btn.BackgroundColor3 = v and Color3.fromRGB(80, 200, 120) or Color3.fromRGB(60, 60, 60)
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = GUI_NAME
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder = 2147483647
+gui.IgnoreGuiInset = true
+local parented = false
+if gethui then
+    local ok, h = pcall(gethui)
+    if ok and h then gui.Parent = h parented = true end
+end
+if not parented then
+    pcall(function() if syn and syn.protect_gui then syn.protect_gui(gui) end end)
+    gui.Parent = game:GetService("CoreGui")
+end
+
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.AnchorPoint = Vector2.new(0.5, 0.5)
+main.Position = UDim2.fromScale(0.5, 0.5)
+main.Size = UDim2.new(0, 340, 0.9, 0)
+main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = gui
+local mc = Instance.new("UICorner") mc.CornerRadius = UDim.new(0, 10) mc.Parent = main
+local ms = Instance.new("UIStroke") ms.Color = Color3.fromRGB(60, 60, 60) ms.Thickness = 1 ms.Parent = main
+
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 36)
+titleBar.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+titleBar.BorderSizePixel = 0
+titleBar.Active = true
+titleBar.Parent = main
+local tbc = Instance.new("UICorner") tbc.CornerRadius = UDim.new(0, 10) tbc.Parent = titleBar
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -130, 1, 0)
+title.Position = UDim2.fromOffset(10, 0)
+title.BackgroundTransparency = 1
+title.Text = "VANZ AUTO-PARRY"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.Parent = titleBar
+
+local function mkBtn(text, xOff, w, txtColor)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(w, 24)
+    b.Position = UDim2.new(1, xOff, 0.5, 0)
+    b.AnchorPoint = Vector2.new(1, 0.5)
+    b.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+    b.Text = text
+    b.TextColor3 = txtColor or Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 13
+    b.BorderSizePixel = 0
+    b.Parent = titleBar
+    local c = Instance.new("UICorner") c.CornerRadius = UDim.new(0, 4) c.Parent = b
+    return b
+end
+
+local closeBtn = mkBtn("X", -6, 26, Color3.fromRGB(255, 90, 90))
+local minBtn   = mkBtn("—", -36, 26)
+local lockBtn  = mkBtn("🔒", -66, 26)
+
+local content = Instance.new("ScrollingFrame")
+content.Name = "Content"
+content.Size = UDim2.new(1, 0, 1, -46)
+content.Position = UDim2.new(0, 0, 0, 40)
+content.BackgroundTransparency = 1
+content.BorderSizePixel = 0
+content.CanvasSize = UDim2.new(0, 0, 0, 800)
+content.ScrollBarThickness = 5
+content.ScrollingDirection = Enum.ScrollingDirection.Y
+content.Parent = main
+
+local autoToggle = makeToggleRow(content, 5, "Auto Parry")
+local silentToggle = makeToggleRow(content, 38, "Silent Parry")
+local visToggle  = makeToggleRow(content, 71, "Visual Radius")
+refreshToggle(autoToggle, State.autoParry)
+refreshToggle(silentToggle, State.silentParry)
+refreshToggle(visToggle,  State.visualRadius)
+
+local radRow = Instance.new("Frame")
+radRow.Size = UDim2.new(1, -20, 0, 30)
+radRow.Position = UDim2.new(0, 10, 0, 104)
+radRow.BackgroundTransparency = 1
+radRow.Parent = content
+
+local radLbl = Instance.new("TextLabel")
+radLbl.Size = UDim2.new(0, 80, 1, 0)
+radLbl.BackgroundTransparency = 1
+radLbl.Text = "Radius"
+radLbl.TextColor3 = Color3.new(1, 1, 1)
+radLbl.TextXAlignment = Enum.TextXAlignment.Left
+radLbl.Font = Enum.Font.Gotham
+radLbl.TextSize = 13
+radLbl.Parent = radRow
+
+local minusBtn = Instance.new("TextButton")
+minusBtn.Size = UDim2.fromOffset(24, 24)
+minusBtn.Position = UDim2.new(1, -180, 0.5, 0)
+minusBtn.AnchorPoint = Vector2.new(1, 0.5)
+minusBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+minusBtn.Text = "-"
+minusBtn.TextColor3 = Color3.new(1, 1, 1)
+minusBtn.Font = Enum.Font.GothamBold
+minusBtn.TextSize = 16
+minusBtn.BorderSizePixel = 0
+minusBtn.Parent = radRow
+local mbc = Instance.new("UICorner") mbc.CornerRadius = UDim.new(0, 4) mbc.Parent = minusBtn
+
+local radInput = Instance.new("TextBox")
+radInput.Size = UDim2.fromOffset(80, 24)
+radInput.Position = UDim2.new(1, -150, 0.5, 0)
+radInput.AnchorPoint = Vector2.new(1, 0.5)
+radInput.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+radInput.Text = tostring(State.radius)
+radInput.TextColor3 = Color3.new(1, 1, 1)
+radInput.PlaceholderText = "15"
+radInput.Font = Enum.Font.Gotham
+radInput.TextSize = 12
+radInput.BorderSizePixel = 0
+radInput.ClearTextOnFocus = false
+radInput.Parent = radRow
+local ric = Instance.new("UICorner") ric.CornerRadius = UDim.new(0, 4) ric.Parent = radInput
+
+local plusBtn = Instance.new("TextButton")
+plusBtn.Size = UDim2.fromOffset(24, 24)
+plusBtn.Position = UDim2.new(1, -64, 0.5, 0)
+plusBtn.AnchorPoint = Vector2.new(1, 0.5)
+plusBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+plusBtn.Text = "+"
+plusBtn.TextColor3 = Color3.new(1, 1, 1)
+plusBtn.Font = Enum.Font.GothamBold
+plusBtn.TextSize = 14
+plusBtn.BorderSizePixel = 0
+plusBtn.Parent = radRow
+local pbc = Instance.new("UICorner") pbc.CornerRadius = UDim.new(0, 4) pbc.Parent = plusBtn
+
+local dotRow = Instance.new("Frame")
+dotRow.Size = UDim2.new(1, -20, 0, 30)
+dotRow.Position = UDim2.new(0, 10, 0, 137)
+dotRow.BackgroundTransparency = 1
+dotRow.Parent = content
+
+local dotLbl = Instance.new("TextLabel")
+dotLbl.Size = UDim2.new(0, 80, 1, 0)
+dotLbl.BackgroundTransparency = 1
+dotLbl.Text = "DOT"
+dotLbl.TextColor3 = Color3.new(1, 1, 1)
+dotLbl.TextXAlignment = Enum.TextXAlignment.Left
+dotLbl.Font = Enum.Font.Gotham
+dotLbl.TextSize = 13
+dotLbl.Parent = dotRow
+
+local dotInput = Instance.new("TextBox")
+dotInput.Size = UDim2.new(1, -100, 0, 24)
+dotInput.Position = UDim2.new(1, 0, 0.5, 0)
+dotInput.AnchorPoint = Vector2.new(1, 0.5)
+dotInput.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+dotInput.Text = tostring(State.dot)
+dotInput.TextColor3 = Color3.new(1, 1, 1)
+dotInput.PlaceholderText = "0.5"
+dotInput.Font = Enum.Font.Gotham
+dotInput.TextSize = 12
+dotInput.BorderSizePixel = 0
+dotInput.ClearTextOnFocus = false
+dotInput.Parent = dotRow
+local dic = Instance.new("UICorner") dic.CornerRadius = UDim.new(0, 4) dic.Parent = dotInput
+
+local sep = Instance.new("Frame")
+sep.Size = UDim2.new(1, -20, 0, 1)
+sep.Position = UDim2.new(0, 10, 0, 173)
+sep.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+sep.BorderSizePixel = 0
+sep.Parent = content
+
+local debugLbl = Instance.new("TextLabel")
+debugLbl.Name = "DebugPanel"
+debugLbl.Size = UDim2.new(1, -20, 0, 200)
+debugLbl.Position = UDim2.new(0, 10, 0, 180)
+debugLbl.BackgroundTransparency = 1
+debugLbl.Text = "loading..."
+debugLbl.TextColor3 = Color3.fromRGB(180, 220, 255)
+debugLbl.TextXAlignment = Enum.TextXAlignment.Left
+debugLbl.TextYAlignment = Enum.TextYAlignment.Top
+debugLbl.Font = Enum.Font.Code
+debugLbl.TextSize = 11
+debugLbl.Parent = content
+
+local testBtn = Instance.new("TextButton")
+testBtn.Size = UDim2.new(1, -20, 0, 28)
+testBtn.Position = UDim2.new(0, 10, 0, 385)
+testBtn.BackgroundColor3 = Color3.fromRGB(60, 90, 140)
+testBtn.Text = "TEST PARRY (manual)"
+testBtn.TextColor3 = Color3.new(1, 1, 1)
+testBtn.Font = Enum.Font.GothamBold
+testBtn.TextSize = 12
+testBtn.BorderSizePixel = 0
+testBtn.Parent = content
+local tbc2 = Instance.new("UICorner") tbc2.CornerRadius = UDim.new(0, 4) tbc2.Parent = testBtn
+
+testBtn.MouseButton1Click:Connect(function()
+    triggerParry("manual")
+end)
+
+-- ============ FAKE PARRY SETTINGS ============
+local FAKE_SKINS = {
+    {name = "Stopwatch", id = "81793464499285", duration = 1.01},
+    {name = "Enten", id = "127096285501517", duration = 1.01},
+    {name = "pan", id = "74655471921270", duration = 1.30},
+    {name = "Diamond sword", id = "85288374151888", duration = 1.10},
+    {name = "BloodShield", id = "75939529748815", duration = 1.01},
+    {name = "Default", id = "109133187196613", duration = 1.01},
+    {name = "Feedbacker", id = "126894569253341", duration = 1.00},
+    {name = "Fish", id = "123307242865945", duration = 1.01},
+    {name = "Vampire Sctyhe", id = "117821101412772", duration = 1.00},
+}
+
+local fakeParryEnabled = false
+local fakeButtonLocked = false
+local selectedFakeSkin = 1
+local fakeButtonPosition = UDim2.fromScale(0.78, 0.72)
+local fakeDragging, fakeMoved = false, false
+local fakeDragStart, fakeStartPosition
+
+local fakeToggle = makeToggleRow(content, 420, "Fake parry")
+local fakeSkinHeader = Instance.new("TextLabel")
+fakeSkinHeader.Size = UDim2.new(1, -20, 0, 24)
+fakeSkinHeader.Position = UDim2.new(0, 10, 0, 455)
+fakeSkinHeader.BackgroundTransparency = 1
+fakeSkinHeader.Text = "Animation skin (pilih satu)"
+fakeSkinHeader.TextColor3 = Color3.new(1, 1, 1)
+fakeSkinHeader.TextXAlignment = Enum.TextXAlignment.Left
+fakeSkinHeader.Font = Enum.Font.Gotham
+fakeSkinHeader.TextSize = 13
+fakeSkinHeader.Visible = false
+fakeSkinHeader.Parent = content
+
+local fakeSkinButtons = {}
+local function refreshFakeSkinButtons()
+    for index, button in ipairs(fakeSkinButtons) do
+        local chosen = index == selectedFakeSkin
+        button.BackgroundColor3 = chosen and Color3.fromRGB(55, 125, 190)
+            or Color3.fromRGB(35, 35, 35)
+        button.Text = (chosen and "✓ " or "") .. FAKE_SKINS[index].name
+    end
+end
+
+for index, skin in ipairs(FAKE_SKINS) do
+    local skinButton = Instance.new("TextButton")
+    skinButton.Name = "FakeSkin_" .. tostring(index)
+    skinButton.Size = UDim2.new(1, -20, 0, 27)
+    skinButton.Position = UDim2.new(0, 10, 0, 482 + ((index - 1) * 30))
+    skinButton.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+    skinButton.BorderSizePixel = 0
+    skinButton.Text = skin.name
+    skinButton.TextColor3 = Color3.new(1, 1, 1)
+    skinButton.Font = Enum.Font.Gotham
+    skinButton.TextSize = 12
+    skinButton.Visible = false
+    skinButton.Parent = content
+    local skinCorner = Instance.new("UICorner")
+    skinCorner.CornerRadius = UDim.new(0, 4)
+    skinCorner.Parent = skinButton
+    fakeSkinButtons[index] = skinButton
+
+    skinButton.MouseButton1Click:Connect(function()
+        selectedFakeSkin = index
+        refreshFakeSkinButtons()
+    end)
+end
+
+local fakeLockToggle = makeToggleRow(content, 760, "Lock button")
+fakeLockToggle.Visible = false
+refreshToggle(fakeToggle, fakeParryEnabled)
+refreshToggle(fakeLockToggle, fakeButtonLocked)
+
+local fakeFloatButton = Instance.new("TextButton")
+fakeFloatButton.Name = "FakeParryFloatButton"
+fakeFloatButton.Size = UDim2.fromOffset(64, 64)
+fakeFloatButton.AnchorPoint = Vector2.new(0.5, 0.5)
+fakeFloatButton.Position = fakeButtonPosition
+fakeFloatButton.BackgroundColor3 = Color3.new(1, 1, 1)
+fakeFloatButton.Text = "Fake"
+fakeFloatButton.TextColor3 = Color3.fromRGB(25, 25, 25)
+fakeFloatButton.Font = Enum.Font.GothamBold
+fakeFloatButton.TextSize = 16
+fakeFloatButton.BorderSizePixel = 0
+fakeFloatButton.Visible = false
+fakeFloatButton.Active = true
+fakeFloatButton.ZIndex = 20
+fakeFloatButton.Parent = gui
+local fakeFloatCorner = Instance.new("UICorner")
+fakeFloatCorner.CornerRadius = UDim.new(1, 0)
+fakeFloatCorner.Parent = fakeFloatButton
+local fakeFloatStroke = Instance.new("UIStroke")
+fakeFloatStroke.Color = Color3.fromRGB(70, 70, 70)
+fakeFloatStroke.Thickness = 1.5
+fakeFloatStroke.Parent = fakeFloatButton
+
+local function updateFakeParryVisibility()
+    fakeSkinHeader.Visible = fakeParryEnabled
+    fakeLockToggle.Visible = fakeParryEnabled
+    for _, button in ipairs(fakeSkinButtons) do
+        button.Visible = fakeParryEnabled
+    end
+    fakeFloatButton.Visible = fakeParryEnabled
+    if not fakeParryEnabled then
+        fakeDragging = false
+    end
+end
+
+local function playSelectedFakeAnimation()
+    local character = LP.Character
+    if not character then return end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return end
+
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = humanoid
+    end
+
+    local skin = FAKE_SKINS[selectedFakeSkin]
+    local animation = Instance.new("Animation")
+    animation.AnimationId = "rbxassetid://" .. skin.id
+
+    task.spawn(function()
+        local ok, track = pcall(function()
+            return animator:LoadAnimation(animation)
+        end)
+        if ok and track then
+            track.Priority = Enum.AnimationPriority.Action
+            track:Play(0)
+            task.delay(skin.duration + 0.15, function()
+                pcall(function() track:Stop(0) end)
+                pcall(function() track:Destroy() end)
+                animation:Destroy()
+            end)
+        else
+            animation:Destroy()
+        end
+    end)
+end
+
+fakeToggle.MouseButton1Click:Connect(function()
+    fakeParryEnabled = not fakeParryEnabled
+    refreshToggle(fakeToggle, fakeParryEnabled)
+    updateFakeParryVisibility()
+end)
+
+fakeLockToggle.MouseButton1Click:Connect(function()
+    fakeButtonLocked = not fakeButtonLocked
+    refreshToggle(fakeLockToggle, fakeButtonLocked)
+end)
+
+fakeFloatButton.InputBegan:Connect(function(input)
+    if not fakeParryEnabled then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        fakeDragging = true
+        fakeMoved = false
+        fakeDragStart = input.Position
+        fakeStartPosition = fakeFloatButton.Position
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if not fakeDragging or fakeButtonLocked then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+    or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - fakeDragStart
+        if delta.Magnitude > 6 then fakeMoved = true end
+        if fakeMoved then
+            fakeFloatButton.Position = UDim2.new(
+                fakeStartPosition.X.Scale, fakeStartPosition.X.Offset + delta.X,
+                fakeStartPosition.Y.Scale, fakeStartPosition.Y.Offset + delta.Y
+            )
+            fakeButtonPosition = fakeFloatButton.Position
+        end
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        if fakeDragging and fakeParryEnabled and not fakeMoved then
+            playSelectedFakeAnimation()
+        end
+        fakeDragging = false
+        fakeMoved = false
+    end
+end)
+
+refreshFakeSkinButtons()
+
+local floatBtn = Instance.new("TextButton")
+floatBtn.Name = "FloatBtn"
+floatBtn.Size = UDim2.fromOffset(56, 56)
+floatBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+floatBtn.Position = UDim2.fromScale(0.5, 0.5)
+floatBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+floatBtn.Text = "AP"
+floatBtn.TextColor3 = Color3.new(1, 1, 1)
+floatBtn.Font = Enum.Font.GothamBold
+floatBtn.TextSize = 18
+floatBtn.BorderSizePixel = 0
+floatBtn.Visible = false
+floatBtn.Parent = gui
+local fbc = Instance.new("UICorner") fbc.CornerRadius = UDim.new(1, 0) fbc.Parent = floatBtn
+local fbs = Instance.new("UIStroke") fbs.Color = Color3.fromRGB(120, 200, 255) fbs.Thickness = 2 fbs.Parent = floatBtn
+
+autoToggle.MouseButton1Click:Connect(function()
+    State.autoParry = not State.autoParry
+    refreshToggle(autoToggle, State.autoParry)
+end)
+silentToggle.MouseButton1Click:Connect(function()
+    State.silentParry = not State.silentParry
+    refreshToggle(silentToggle, State.silentParry)
+end)
+visToggle.MouseButton1Click:Connect(function()
+    State.visualRadius = not State.visualRadius
+    refreshToggle(visToggle, State.visualRadius)
+    if not State.visualRadius and ringSG then ringSG.Enabled = false end
+end)
+
+local function setRadius(v)
+    v = tonumber(v)
+    if not v then return end
+    if v < 0 then v = 0 end
+    State.radius = v
+    if radInput.Text ~= tostring(v) then radInput.Text = tostring(v) end
+end
+minusBtn.MouseButton1Click:Connect(function() setRadius(State.radius - 1) end)
+plusBtn.MouseButton1Click:Connect(function() setRadius(State.radius + 1) end)
+radInput.FocusLost:Connect(function()
+    local v = tonumber(radInput.Text)
+    if v then setRadius(v) else radInput.Text = tostring(State.radius) end
+end)
+dotInput.FocusLost:Connect(function()
+    local v = tonumber(dotInput.Text)
+    if v then
+        v = math.clamp(v, -1, 1)
+        State.dot = v
+        dotInput.Text = tostring(v)
+    else
+        dotInput.Text = tostring(State.dot)
+    end
+end)
+
+-- ============ DEBUG LOOP ============
+task.spawn(function()
+    while gui.Parent do
+        task.wait(0.1)
+        local animAgo = Debug.lastAnimAgo > 0 and (tick() - Debug.lastAnimAgo) or 999
+        local animStr = Debug.lastAnimId ~= "-"
+            and ("%s (%.1fs)"):format(Debug.lastAnimId, animAgo) or "-"
+        local distStr = Debug.distance >= 0 and ("%.1f"):format(Debug.distance) or "-"
+        
+        local cdLeft = ServerCD_EndTime - tick()
+        if cdLeft < 0 then cdLeft = 0 end
+        
+        local text = table.concat({
+            ("Killers  : %d   Hook: %s"):format(Debug.killerCount, Debug.hooked and "YES" or "NO"),
+            ("Animator : %s"):format(Debug.animatorPath),
+            ("LastAnim : %s"):format(animStr),
+            ("Dist/Face: %s / %.2f"):format(distStr, Debug.facing),
+            ("Wall     : %s"):format(tostring(Debug.wallHit)),
+            ("Btn      : %s  Conns:%d"):format(Debug.btnPath, Debug.btnConns),
+            ("Method   : %s"):format(Debug.lastFireMethod),
+            ("Trigger  : %d  Reason: %s"):format(Debug.triggerAttempts, Debug.lastTriggerReason),
+            ("Server   : OK=%d FAIL=%d  CD: %.1fs"):format(Debug.triggerOk, Debug.triggerFail, cdLeft),
+            ("Result   : %s"):format(Debug.lastResult),
+            ("Nudge    : %s"):format(Debug.nudge),
+            ("Error    : %s"):format(Debug.lastError),
+        }, "\n")
+        debugLbl.Text = text
+    end
+end)
+
+-- ============ FLOAT / DRAG ============
+local isLocked      = true
+local floatPos      = UDim2.fromScale(0.5, 0.5)
+local floatHasMoved = false
+
+local function showMain()
+    main.Visible = true
+    floatBtn.Visible = false
+end
+local function showFloat()
+    floatBtn.Position = floatHasMoved and floatPos or UDim2.fromScale(0.5, 0.5)
+    main.Visible = false
+    floatBtn.Visible = true
+end
+
+minBtn.MouseButton1Click:Connect(showFloat)
+
+closeBtn.MouseButton1Click:Connect(function()
+    unhookKiller()
+    if renderConn then pcall(function() renderConn:Disconnect() end) end
+    if ringPart then pcall(function() ringPart:Destroy() end) end
+    gui:Destroy()
+end)
+
+lockBtn.MouseButton1Click:Connect(function()
+    isLocked = not isLocked
+    lockBtn.Text = isLocked and "🔒" or "🔓"
+end)
+
+local fDragging, fMoved, fStart, fStartPos = false, false, nil, nil
+floatBtn.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        fDragging = true
+        fMoved    = false
+        fStart    = input.Position
+        fStartPos = floatBtn.Position
+    end
+end)
+UIS.InputChanged:Connect(function(input)
+    if not fDragging or isLocked then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+    or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - fStart
+        if delta.Magnitude > 4 then fMoved = true end
+        if fMoved then
+            floatBtn.Position = UDim2.new(
+                fStartPos.X.Scale, fStartPos.X.Offset + delta.X,
+                fStartPos.Y.Scale, fStartPos.Y.Offset + delta.Y
+            )
+        end
+    end
+end)
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        if fDragging then
+            if fMoved then
+                floatPos = floatBtn.Position
+                floatHasMoved = true
+            else
+                showMain()
+            end
+            fDragging = false
+            fStart = nil
+        end
+    end
+end)
+
+local mDragging, mStart, mStartPos = false, nil, nil
+titleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        mDragging = true
+        mStart    = input.Position
+        mStartPos = main.Position
+    end
+end)
+UIS.InputChanged:Connect(function(input)
+    if not mDragging then return end
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+    or input.UserInputType == Enum.UserInputType.Touch then
+        local delta = input.Position - mStart
+        main.Position = UDim2.new(
+            mStartPos.X.Scale, mStartPos.X.Offset + delta.X,
+            mStartPos.Y.Scale, mStartPos.Y.Offset + delta.Y
+        )
+    end
+end)
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        mDragging = false
+    end
+end)
