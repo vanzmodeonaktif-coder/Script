@@ -1,0 +1,693 @@
+--[[
+KAIRO LAB TOOL - SILENT AIM TWIST OF FATE (FINAL FIXED + PREDICT)
+Context: Security Research / CTF / Lab Environment
+Target: Violence District (Roblox)
+Features:
+- Hook TwistoffateEffects.aimDirection
+- Killer detection via Lookscriptkiller
+- Adaptive skin detection
+- FOV Circle (Green=Clear, Red=Blocked)
+- Predict Move (Leading Shot)
+- Draggable UI with Lock/Unlock toggle
+- Minimize to draggable icon
+- No floating fire button, no tracer line
+]]
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+-- ==========================================
+-- CONFIGURATION
+-- ==========================================
+local CONFIG = {
+    FOV_DEFAULT = 120,
+    FOV_MIN = 10,
+    FOV_MAX = 360,
+    FOV_STEP = 10,
+    TARGET_PRIORITY = {"UpperTorso", "Torso"},
+    BULLET_SPEED = 800, -- dari decompile: v_u_7.bullet(..., 800, ...)
+    PREDICT_ITERATIONS = 3,
+}
+
+-- ==========================================
+-- STATE
+-- ==========================================
+local State = {
+    SilentAim = false,
+    PredictMove = false,
+    FOV = CONFIG.FOV_DEFAULT,
+    Killer = nil,
+    KillerChar = nil,
+    SkinModel = nil,
+    IsDragging = false,
+    DragStartInput = nil,
+    DragStartPos = nil,
+    IsLocked = false,
+    IsMinimized = false,
+}
+
+-- ==========================================
+-- HOOK: TwistoffateEffects.aimDirection
+-- ==========================================
+local EffectsModule = ReplicatedStorage:WaitForChild("Modules")
+    :WaitForChild("Items")
+    :WaitForChild("TwistOfFate")
+    :WaitForChild("TwistoffateEffects")
+
+local Effects = require(EffectsModule)
+local originalAimDirection = Effects.aimDirection
+
+-- ==========================================
+-- UTILITY FUNCTIONS
+-- ==========================================
+local function findKiller()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            if player.Character:FindFirstChild("Lookscriptkiller", true) then
+                return player
+            end
+        end
+    end
+    return nil
+end
+
+local function getTargetPart(character)
+    if not character then return nil end
+    for _, partName in ipairs(CONFIG.TARGET_PRIORITY) do
+        local part = character:FindFirstChild(partName)
+        if part then return part end
+    end
+    return nil
+end
+
+local function detectSkin()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local twistOfFate = char:FindFirstChild("Twist of Fate")
+    if not twistOfFate then return nil end
+    local rightArm = twistOfFate:FindFirstChild("Right Arm")
+    if not rightArm then return nil end
+    for _, child in pairs(rightArm:GetChildren()) do
+        if child:IsA("Model") and not child:IsA("Script") and not child:IsA("LocalScript") then
+            return child
+        end
+    end
+    return nil
+end
+
+local function getMuzzlePosition(character)
+    if not character then return nil end
+    if State.SkinModel then
+        local smokePart = State.SkinModel:FindFirstChild("SmokePart", true)
+        if smokePart and smokePart:IsA("BasePart") then return smokePart.Position end
+        local barrel = State.SkinModel:FindFirstChild("barrel", true)
+        if barrel and barrel:IsA("BasePart") then return barrel.Position end
+        if State.SkinModel.PrimaryPart then return State.SkinModel.PrimaryPart.Position end
+    end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if hrp then return (hrp.CFrame * CFrame.new(0.7, 1.373, -2.5)).Position end
+    return nil
+end
+
+local function checkWall(origin, targetPos)
+    local direction = targetPos - origin
+    if direction.Magnitude < 0.1 then return false end
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    raycastParams.IgnoreWater = true
+    local excludeList = {}
+    for _, p in pairs(Players:GetPlayers()) do
+        if p.Character then table.insert(excludeList, p.Character) end
+    end
+    if State.SkinModel then table.insert(excludeList, State.SkinModel) end
+    raycastParams.FilterDescendantsInstances = excludeList
+    local result = workspace:Raycast(origin, direction, raycastParams)
+    return result ~= nil
+end
+
+local function isInFOV(targetPos)
+    local cameraDir = Camera.CFrame.LookVector
+    local cameraPos = Camera.CFrame.Position
+    local toTarget = (targetPos - cameraPos)
+    if toTarget.Magnitude < 0.1 then return true end
+    local dot = math.clamp(cameraDir:Dot(toTarget.Unit), -1, 1)
+    local angle = math.deg(math.acos(dot))
+    return angle <= (State.FOV / 2)
+end
+
+-- ==========================================
+-- PREDICT MOVE (LEADING SHOT)
+-- ==========================================
+local function predictPosition(killerChar, muzzlePos)
+    local targetPart = getTargetPart(killerChar)
+    if not targetPart then return nil end
+    
+    local hrp = killerChar:FindFirstChild("HumanoidRootPart")
+    if not hrp then return targetPart.Position end
+    
+    local killerVelocity = hrp.Velocity
+    if killerVelocity.Magnitude < 1 then
+        return targetPart.Position -- tidak bergerak signifikan
+    end
+    
+    local currentPos = targetPart.Position
+    local distance = (currentPos - muzzlePos).Magnitude
+    local timeToHit = distance / CONFIG.BULLET_SPEED
+    
+    -- Iterative prediction untuk akurasi
+    local predictedPos = currentPos
+    for i = 1, CONFIG.PREDICT_ITERATIONS do
+        local futurePos = currentPos + killerVelocity * timeToHit
+        local futureDistance = (futurePos - muzzlePos).Magnitude
+        timeToHit = futureDistance / CONFIG.BULLET_SPEED
+        predictedPos = futurePos
+    end
+    
+    return predictedPos
+end
+
+local function getEffectiveTargetPos(character, muzzlePos)
+    local targetPart = getTargetPart(State.KillerChar)
+    if not targetPart then return nil end
+    
+    if State.PredictMove then
+        return predictPosition(State.KillerChar, muzzlePos)
+    else
+        return targetPart.Position
+    end
+end
+
+-- ==========================================
+-- APPLY HOOK
+-- ==========================================
+Effects.aimDirection = function(character, cameraCFrame)
+    if not State.SilentAim then
+        return originalAimDirection(character, cameraCFrame)
+    end
+    
+    local muzzlePos = getMuzzlePosition(character)
+    if not muzzlePos then
+        return originalAimDirection(character, cameraCFrame)
+    end
+    
+    local targetPos = getEffectiveTargetPos(character, muzzlePos)
+    if not targetPos then
+        return originalAimDirection(character, cameraCFrame)
+    end
+    
+    if not isInFOV(targetPos) then
+        return originalAimDirection(character, cameraCFrame)
+    end
+    
+    local direction = (targetPos - muzzlePos)
+    if direction.Magnitude < 0.01 then
+        return originalAimDirection(character, cameraCFrame)
+    end
+    
+    return direction.Unit
+end
+
+-- ==========================================
+-- UI BUILDING
+-- ==========================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "Kairo_SilentAim_Final"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+-- Main Panel
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 260, 0, 160)
+MainFrame.Position = UDim2.new(0, 15, 0.5, -80)
+MainFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+MainFrame.BackgroundTransparency = 0.08
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.ZIndex = 100
+MainFrame.Parent = ScreenGui
+
+local MainCorner = Instance.new("UICorner")
+MainCorner.CornerRadius = UDim.new(0, 8)
+MainCorner.Parent = MainFrame
+
+local MainStroke = Instance.new("UIStroke")
+MainStroke.Color = Color3.fromRGB(255, 255, 255)
+MainStroke.Thickness = 1
+MainStroke.Transparency = 0.3
+MainStroke.Parent = MainFrame
+
+-- Title Bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Name = "TitleBar"
+TitleBar.Size = UDim2.new(1, 0, 0, 28)
+TitleBar.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+TitleBar.BorderSizePixel = 0
+TitleBar.Active = true -- FIX: biar bisa di-drag
+TitleBar.ZIndex = 101
+TitleBar.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 8)
+TitleCorner.Parent = TitleBar
+
+local TitleMask = Instance.new("Frame")
+TitleMask.Size = UDim2.new(1, 0, 0, 10)
+TitleMask.Position = UDim2.new(0, 0, 1, -10)
+TitleMask.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+TitleMask.BorderSizePixel = 0
+TitleMask.ZIndex = 101
+TitleMask.Parent = TitleBar
+
+-- Title Label
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -90, 1, 0)
+TitleLabel.Position = UDim2.new(0, 8, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "KAIRO"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+TitleLabel.Font = Enum.Font.Code
+TitleLabel.TextSize = 13
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.ZIndex = 102
+TitleLabel.Parent = TitleBar
+
+-- Lock Button (🔓/🔒)
+local LockBtn = Instance.new("TextButton")
+LockBtn.Name = "LockBtn"
+LockBtn.Size = UDim2.new(0, 24, 0, 22)
+LockBtn.Position = UDim2.new(1, -86, 0, 3)
+LockBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+LockBtn.Text = "🔓"
+LockBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+LockBtn.Font = Enum.Font.Code
+LockBtn.TextSize = 14
+LockBtn.ZIndex = 102
+LockBtn.Parent = TitleBar
+local LockCorner = Instance.new("UICorner")
+LockCorner.CornerRadius = UDim.new(0, 4)
+LockCorner.Parent = LockBtn
+
+-- Minimize Button
+local MinBtn = Instance.new("TextButton")
+MinBtn.Name = "MinBtn"
+MinBtn.Size = UDim2.new(0, 24, 0, 22)
+MinBtn.Position = UDim2.new(1, -58, 0, 3)
+MinBtn.BackgroundColor3 = Color3.fromRGB(220, 180, 50)
+MinBtn.Text = "_"
+MinBtn.TextColor3 = Color3.fromRGB(0, 0, 0)
+MinBtn.Font = Enum.Font.Code
+MinBtn.TextSize = 14
+MinBtn.ZIndex = 102
+MinBtn.Parent = TitleBar
+local MinCorner = Instance.new("UICorner")
+MinCorner.CornerRadius = UDim.new(0, 4)
+MinCorner.Parent = MinBtn
+
+-- Close Button
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Name = "CloseBtn"
+CloseBtn.Size = UDim2.new(0, 24, 0, 22)
+CloseBtn.Position = UDim2.new(1, -30, 0, 3)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(220, 50, 50)
+CloseBtn.Text = "X"
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Font = Enum.Font.Code
+CloseBtn.TextSize = 12
+CloseBtn.ZIndex = 102
+CloseBtn.Parent = TitleBar
+local CloseCorner = Instance.new("UICorner")
+CloseCorner.CornerRadius = UDim.new(0, 4)
+CloseCorner.Parent = CloseBtn
+
+-- Content Frame
+local Content = Instance.new("Frame")
+Content.Name = "Content"
+Content.Size = UDim2.new(1, -12, 1, -36)
+Content.Position = UDim2.new(0, 6, 0, 32)
+Content.BackgroundTransparency = 1
+Content.ZIndex = 101
+Content.Parent = MainFrame
+
+-- Toggle Silent Aim
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size = UDim2.new(1, 0, 0, 28)
+ToggleBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+ToggleBtn.Text = "Silent Aim [OFF]"
+ToggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Font = Enum.Font.Code
+ToggleBtn.TextSize = 12
+ToggleBtn.ZIndex = 102
+ToggleBtn.Parent = Content
+local ToggleCorner = Instance.new("UICorner")
+ToggleCorner.CornerRadius = UDim.new(0, 6)
+ToggleCorner.Parent = ToggleBtn
+
+-- FOV Control
+local FOVFrame = Instance.new("Frame")
+FOVFrame.Size = UDim2.new(1, 0, 0, 28)
+FOVFrame.Position = UDim2.new(0, 0, 0, 32)
+FOVFrame.BackgroundTransparency = 1
+FOVFrame.ZIndex = 102
+FOVFrame.Parent = Content
+
+local FOVLabel = Instance.new("TextLabel")
+FOVLabel.Size = UDim2.new(1, -70, 1, 0)
+FOVLabel.BackgroundTransparency = 1
+FOVLabel.Text = "FOV: 120°"
+FOVLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+FOVLabel.Font = Enum.Font.Code
+FOVLabel.TextSize = 12
+FOVLabel.TextXAlignment = Enum.TextXAlignment.Left
+FOVLabel.ZIndex = 103
+FOVLabel.Parent = FOVFrame
+
+local FOVMinus = Instance.new("TextButton")
+FOVMinus.Size = UDim2.new(0, 30, 1, 0)
+FOVMinus.Position = UDim2.new(1, -64, 0, 0)
+FOVMinus.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+FOVMinus.Text = "-"
+FOVMinus.TextColor3 = Color3.fromRGB(255, 255, 255)
+FOVMinus.Font = Enum.Font.Code
+FOVMinus.TextSize = 14
+FOVMinus.ZIndex = 103
+FOVMinus.Parent = FOVFrame
+local FOVMinusCorner = Instance.new("UICorner")
+FOVMinusCorner.CornerRadius = UDim.new(0, 4)
+FOVMinusCorner.Parent = FOVMinus
+
+local FOVPlus = Instance.new("TextButton")
+FOVPlus.Size = UDim2.new(0, 30, 1, 0)
+FOVPlus.Position = UDim2.new(1, -30, 0, 0)
+FOVPlus.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+FOVPlus.Text = "+"
+FOVPlus.TextColor3 = Color3.fromRGB(255, 255, 255)
+FOVPlus.Font = Enum.Font.Code
+FOVPlus.TextSize = 14
+FOVPlus.ZIndex = 103
+FOVPlus.Parent = FOVFrame
+local FOVPlusCorner = Instance.new("UICorner")
+FOVPlusCorner.CornerRadius = UDim.new(0, 4)
+FOVPlusCorner.Parent = FOVPlus
+
+-- Predict Move Toggle
+local PredictBtn = Instance.new("TextButton")
+PredictBtn.Size = UDim2.new(1, 0, 0, 28)
+PredictBtn.Position = UDim2.new(0, 0, 0, 64)
+PredictBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+PredictBtn.Text = "Predict Move [OFF]"
+PredictBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+PredictBtn.Font = Enum.Font.Code
+PredictBtn.TextSize = 12
+PredictBtn.ZIndex = 102
+PredictBtn.Parent = Content
+local PredictCorner = Instance.new("UICorner")
+PredictCorner.CornerRadius = UDim.new(0, 6)
+PredictCorner.Parent = PredictBtn
+
+-- Status Label
+local StatusLabel = Instance.new("TextLabel")
+StatusLabel.Size = UDim2.new(1, 0, 0, 18)
+StatusLabel.Position = UDim2.new(0, 0, 1, -18)
+StatusLabel.BackgroundTransparency = 1
+StatusLabel.Text = "Status: Waiting..."
+StatusLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+StatusLabel.Font = Enum.Font.Code
+StatusLabel.TextSize = 11
+StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
+StatusLabel.ZIndex = 102
+StatusLabel.Parent = Content
+
+-- ==========================================
+-- FOV CIRCLE (Color-Coded: Green=Clear, Red=Blocked)
+-- ==========================================
+local FOVCircle = Instance.new("Frame")
+FOVCircle.Name = "FOVCircle"
+FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FOVCircle.Position = UDim2.new(0.5, 0, 0.5, 0)
+FOVCircle.Size = UDim2.new(0, 240, 0, 240)
+FOVCircle.BackgroundTransparency = 1
+FOVCircle.BorderSizePixel = 0
+FOVCircle.Visible = false
+FOVCircle.ZIndex = 50
+FOVCircle.Parent = ScreenGui
+
+local FOVCircleCorner = Instance.new("UICorner")
+FOVCircleCorner.CornerRadius = UDim.new(1, 0)
+FOVCircleCorner.Parent = FOVCircle
+
+local FOVCircleStroke = Instance.new("UIStroke")
+FOVCircleStroke.Color = Color3.fromRGB(0, 255, 0)
+FOVCircleStroke.Thickness = 2
+FOVCircleStroke.Transparency = 0.15
+FOVCircleStroke.Parent = FOVCircle
+
+-- ==========================================
+-- MINIMIZED ICON (Draggable)
+-- ==========================================
+local MinIcon = Instance.new("TextButton")
+MinIcon.Name = "MinIcon"
+MinIcon.Size = UDim2.new(0, 36, 0, 36)
+MinIcon.Position = UDim2.new(0, 15, 0.5, -18)
+MinIcon.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+MinIcon.Text = "🎯"
+MinIcon.TextColor3 = Color3.fromRGB(255, 255, 255)
+MinIcon.Font = Enum.Font.Code
+MinIcon.TextSize = 18
+MinIcon.Active = true
+MinIcon.Visible = false
+MinIcon.ZIndex = 200
+MinIcon.Parent = ScreenGui
+local MinIconCorner = Instance.new("UICorner")
+MinIconCorner.CornerRadius = UDim.new(1, 0)
+MinIconCorner.Parent = MinIcon
+local MinIconStroke = Instance.new("UIStroke")
+MinIconStroke.Color = Color3.fromRGB(255, 255, 255)
+MinIconStroke.Thickness = 1
+MinIconStroke.Transparency = 0.3
+MinIconStroke.Parent = MinIcon
+
+-- ==========================================
+-- UI LOGIC
+-- ==========================================
+local function updateFOVVisual()
+    local radius = State.FOV * 2
+    FOVCircle.Size = UDim2.new(0, radius, 0, radius)
+    FOVLabel.Text = "FOV: " .. State.FOV .. "°"
+end
+
+local function toggleSilentAim()
+    State.SilentAim = not State.SilentAim
+    ToggleBtn.Text = State.SilentAim and "Silent Aim [ON]" or "Silent Aim [OFF]"
+    ToggleBtn.BackgroundColor3 = State.SilentAim and Color3.fromRGB(0, 140, 0) or Color3.fromRGB(50, 50, 50)
+    FOVCircle.Visible = State.SilentAim -- FIX: gak depend on IsMinimized
+    if State.SilentAim then State.SkinModel = detectSkin() end
+end
+
+local function togglePredict()
+    State.PredictMove = not State.PredictMove
+    PredictBtn.Text = State.PredictMove and "Predict Move [ON]" or "Predict Move [OFF]"
+    PredictBtn.BackgroundColor3 = State.PredictMove and Color3.fromRGB(0, 100, 180) or Color3.fromRGB(50, 50, 50)
+end
+
+local function toggleLock()
+    State.IsLocked = not State.IsLocked
+    LockBtn.Text = State.IsLocked and "🔒" or "🔓"
+    LockBtn.BackgroundColor3 = State.IsLocked and Color3.fromRGB(180, 50, 50) or Color3.fromRGB(60, 60, 60)
+end
+
+local function toggleMinimize()
+    State.IsMinimized = not State.IsMinimized
+    MainFrame.Visible = not State.IsMinimized
+    MinIcon.Visible = State.IsMinimized
+    -- FIX: FOV tetap visible selama SilentAim ON
+    FOVCircle.Visible = State.SilentAim
+end
+
+-- ==========================================
+-- DRAG SYSTEM (DELTA-BASED, MORE RELIABLE)
+-- ==========================================
+local function startDragMain(inputPosition)
+    if State.IsLocked then return end
+    State.IsDragging = true
+    State.DragStartInput = inputPosition
+    State.DragStartPos = MainFrame.Position
+end
+
+local function startDragIcon(inputPosition)
+    State.IsDragging = true
+    State.DragStartInput = inputPosition
+    State.DragStartPos = MinIcon.Position
+end
+
+local function updateDrag(currentInput)
+    if not State.IsDragging or not State.DragStartInput then return end
+    local delta = currentInput - State.DragStartInput
+    local newPos = UDim2.new(
+        State.DragStartPos.X.Scale, State.DragStartPos.X.Offset + delta.X,
+        State.DragStartPos.Y.Scale, State.DragStartPos.Y.Offset + delta.Y
+    )
+    if State.IsMinimized then
+        MinIcon.Position = newPos
+    else
+        MainFrame.Position = newPos
+    end
+end
+
+local function endDrag()
+    State.IsDragging = false
+    State.DragStartInput = nil
+    State.DragStartPos = nil
+end
+
+-- Title Bar Drag
+TitleBar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or 
+       input.UserInputType == Enum.UserInputType.Touch then
+        startDragMain(Vector2.new(input.Position.X, input.Position.Y))
+    end
+end)
+
+-- Min Icon Drag
+MinIcon.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or 
+       input.UserInputType == Enum.UserInputType.Touch then
+        startDragIcon(Vector2.new(input.Position.X, input.Position.Y))
+    end
+end)
+
+MinIcon.MouseButton1Click:Connect(toggleMinimize)
+
+UserInputService.InputChanged:Connect(function(input)
+    if State.IsDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or 
+                            input.UserInputType == Enum.UserInputType.Touch) then
+        updateDrag(Vector2.new(input.Position.X, input.Position.Y))
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or 
+       input.UserInputType == Enum.UserInputType.Touch then
+        endDrag()
+    end
+end)
+
+-- Button Events
+CloseBtn.MouseButton1Click:Connect(function() ScreenGui.Enabled = false end)
+MinBtn.MouseButton1Click:Connect(toggleMinimize)
+LockBtn.MouseButton1Click:Connect(toggleLock)
+ToggleBtn.MouseButton1Click:Connect(toggleSilentAim)
+PredictBtn.MouseButton1Click:Connect(togglePredict)
+
+FOVMinus.MouseButton1Click:Connect(function()
+    if State.FOV > CONFIG.FOV_MIN then State.FOV = State.FOV - CONFIG.FOV_STEP; updateFOVVisual() end
+end)
+FOVPlus.MouseButton1Click:Connect(function()
+    if State.FOV < CONFIG.FOV_MAX then State.FOV = State.FOV + CONFIG.FOV_STEP; updateFOVVisual() end
+end)
+
+-- Keyboard Toggle
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.F then toggleSilentAim() end
+end)
+
+-- ==========================================
+-- MAIN RENDER LOOP
+-- ==========================================
+RunService.RenderStepped:Connect(function()
+    Camera = workspace.CurrentCamera
+    
+    if State.SilentAim and not State.SkinModel then
+        State.SkinModel = detectSkin()
+    end
+    
+    local currentKiller = findKiller()
+    if currentKiller ~= State.Killer then
+        State.Killer = currentKiller
+        State.KillerChar = currentKiller and currentKiller.Character
+    end
+    if State.Killer and State.Killer.Character ~= State.KillerChar then
+        State.KillerChar = State.Killer.Character
+    end
+    
+    if not State.SilentAim then
+        FOVCircleStroke.Color = Color3.fromRGB(255, 255, 255)
+        StatusLabel.Text = "Status: Disabled"
+        StatusLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+        return
+    end
+    
+    if not State.KillerChar then
+        FOVCircleStroke.Color = Color3.fromRGB(255, 255, 255)
+        StatusLabel.Text = "Status: Scanning..."
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 200, 50)
+        return
+    end
+    
+    local targetPart = getTargetPart(State.KillerChar)
+    if not targetPart then
+        FOVCircleStroke.Color = Color3.fromRGB(255, 255, 255)
+        StatusLabel.Text = "Status: No body part"
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+        return
+    end
+    
+    local muzzlePos = getMuzzlePosition(LocalPlayer.Character)
+    if not muzzlePos then
+        FOVCircleStroke.Color = Color3.fromRGB(255, 255, 255)
+        StatusLabel.Text = "Status: No muzzle"
+        StatusLabel.TextColor3 = Color3.fromRGB(160, 160, 160)
+        return
+    end
+    
+    -- Pakai effective target pos (dengan atau tanpa predict)
+    local effectiveTargetPos = getEffectiveTargetPos(LocalPlayer.Character, muzzlePos)
+    if not effectiveTargetPos then
+        FOVCircleStroke.Color = Color3.fromRGB(255, 255, 255)
+        return
+    end
+    
+    local inFOV = isInFOV(effectiveTargetPos)
+    
+    if not inFOV then
+        FOVCircleStroke.Color = Color3.fromRGB(255, 255, 255)
+        local cameraDir = Camera.CFrame.LookVector
+        local toTarget = (effectiveTargetPos - Camera.CFrame.Position)
+        local angle = 0
+        if toTarget.Magnitude > 0.1 then
+            angle = math.deg(math.acos(math.clamp(cameraDir:Dot(toTarget.Unit), -1, 1)))
+        end
+        StatusLabel.Text = string.format("Status: Out of FOV (%d°)", math.floor(angle))
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 200, 50)
+        return
+    end
+    
+    -- In FOV: Check wall for color coding
+    local isBlocked = checkWall(muzzlePos, effectiveTargetPos)
+    FOVCircleStroke.Color = isBlocked and Color3.fromRGB(255, 50, 50) or Color3.fromRGB(50, 255, 50)
+    
+    local dist = math.floor((effectiveTargetPos - Camera.CFrame.Position).Magnitude)
+    local predictStatus = State.PredictMove and " | PREDICT" or ""
+    
+    if isBlocked then
+        StatusLabel.Text = string.format("Status: LOCKED | %dm | BLOCKED%s", dist, predictStatus)
+        StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    else
+        StatusLabel.Text = string.format("Status: LOCKED | %dm | CLEAR%s", dist, predictStatus)
+        StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+    end
+end)
+
+-- Init
+updateFOVVisual()
+print("[KAIRO] Silent Aim ToF (Final Fixed + Predict) Loaded.")
+print("[KAIRO] Hook: TwistoffateEffects.aimDirection")
+print("[KAIRO] FOV: Green=Clear, Red=Blocked")
+print("[KAIRO] Predict: Leading shot calculation")
+print("[KAIRO] Press F to toggle Silent Aim")
